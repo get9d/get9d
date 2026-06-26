@@ -837,6 +837,95 @@ body.annual .monthly-price { display: none; }
 body.annual .annual-price { display: block; }
 body:not(.annual) .monthly-price { display: block; }
 body:not(.annual) .annual-price { display: none; }
+
+/* ── TRY IT SECTION ──────────────────────────────────────── */
+#try { background: var(--ink); padding: var(--section-pad); }
+.try-header { margin-bottom: 36px; }
+.try-card {
+  border: 1px solid rgba(232,224,208,.1);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(14,143,163,.15), 0 24px 60px rgba(0,0,0,.4);
+  background: #1A1D26;
+}
+.try-tabs {
+  display: flex;
+  border-bottom: 1px solid rgba(232,224,208,.08);
+  background: #0F1117;
+}
+.try-tab {
+  flex: 1; padding: 16px 20px; font-size: 13px; font-weight: 500;
+  color: #7A7268; background: transparent; border: none;
+  border-bottom: 2px solid transparent;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  transition: all .2s; cursor: pointer;
+}
+.try-tab:hover { color: #C8BFB0; }
+.try-tab.active { color: #fff; border-bottom-color: #0E8FA3; background: #1A1D26; }
+.try-tab-icon { font-size: 15px; }
+.try-pane { display: none; padding: 28px 32px; }
+.try-pane.active { display: block; }
+.try-pane-hint { font-size: 13px; color: #7A7268; margin-bottom: 18px; line-height: 1.5; }
+.try-url-row { display: flex; gap: 10px; margin-bottom: 16px; }
+.try-input {
+  flex: 1; background: #0F1117; border: 1px solid rgba(232,224,208,.12);
+  border-radius: 10px; padding: 14px 16px; font-size: 14px; color: #E8E0D0;
+  outline: none; transition: border-color .2s; font-family: inherit;
+}
+.try-input:focus { border-color: #0E8FA3; }
+.try-input::placeholder { color: #4A4640; }
+.try-submit-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 24px; background: #0E8FA3; color: #0F1117;
+  border: none; border-radius: 10px; font-size: 14px; font-weight: 600;
+  cursor: pointer; white-space: nowrap; transition: opacity .2s, transform .2s;
+  font-family: inherit;
+}
+.try-submit-btn:hover { opacity: .88; transform: translateY(-1px); }
+.try-arrow { font-size: 16px; }
+.try-examples-label {
+  font-size: 11px; color: #4A4640; margin-bottom: 8px;
+  font-family: 'JetBrains Mono', monospace; letter-spacing: .5px; text-transform: uppercase;
+}
+.try-examples { display: flex; flex-wrap: wrap; gap: 6px; }
+.try-example {
+  font-size: 11px; padding: 5px 12px; border-radius: 20px;
+  border: 1px solid rgba(232,224,208,.12); background: transparent;
+  color: #7A7268; cursor: pointer; transition: all .2s; font-family: inherit;
+}
+.try-example:hover { border-color: rgba(14,143,163,.4); color: #0E8FA3; background: rgba(14,143,163,.06); }
+.disc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.disc-field-wrap { display: flex; flex-direction: column; gap: 5px; }
+.disc-label {
+  font-size: 10px; font-weight: 500; color: #7A7268;
+  text-transform: uppercase; letter-spacing: .5px; font-family: 'JetBrains Mono', monospace;
+}
+.disc-select, .disc-input {
+  background: #0F1117; border: 1px solid rgba(232,224,208,.1);
+  border-radius: 8px; padding: 9px 11px; font-size: 12px; color: #E8E0D0;
+  outline: none; transition: border-color .2s; font-family: inherit; -webkit-appearance: none;
+}
+.disc-select:focus, .disc-input:focus { border-color: #0E8FA3; }
+.disc-select { cursor: pointer; }
+.disc-input::placeholder { color: #4A4640; }
+.disc-textarea {
+  width: 100%; background: #0F1117; border: 1px solid rgba(232,224,208,.1);
+  border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #E8E0D0;
+  outline: none; resize: vertical; min-height: 72px; transition: border-color .2s;
+  font-family: inherit; line-height: 1.5;
+}
+.disc-textarea:focus { border-color: #0E8FA3; }
+.disc-textarea::placeholder { color: #4A4640; }
+@media (max-width: 800px) {
+  .disc-grid { grid-template-columns: repeat(2, 1fr); }
+  .try-url-row { flex-direction: column; }
+  .try-submit-btn { width: 100%; justify-content: center; }
+  .try-pane { padding: 20px; }
+}
+@media (max-width: 480px) {
+  .disc-grid { grid-template-columns: 1fr; }
+  .try-tab { font-size: 12px; padding: 13px 12px; }
+}
 </style>
 </head>
 <body spellcheck="false">
@@ -889,6 +978,176 @@ body:not(.annual) .annual-price { display: none; }
         <div class="radar-score-label">9D Score</div>
       </div>
     </div>
+  </div>
+</section>
+
+<!-- TRY IT ─────────────────────────────────────────────────── -->
+<section id="try" aria-labelledby="try-heading">
+  <div class="container">
+    <div class="try-header">
+      <p class="section-eyebrow">Try it now</p>
+      <h2 class="section-title" id="try-heading">Score your first property free</h2>
+      <p class="section-body">Two ways to start. Paste a listing URL for instant analysis, or use the discovery form to describe what you are looking for and let 9D find and score matching opportunities for you.</p>
+    </div>
+
+    <div class="try-card" role="region" aria-label="Property scoring input">
+
+      <!-- Tab switcher -->
+      <div class="try-tabs" role="tablist">
+        <button class="try-tab active" role="tab" aria-selected="true"  aria-controls="tab-url"        id="btn-url"        onclick="switchTryTab('url')">
+          <span class="try-tab-icon">🔗</span> Paste a listing URL
+        </button>
+        <button class="try-tab"        role="tab" aria-selected="false" aria-controls="tab-discovery"  id="btn-discovery"  onclick="switchTryTab('discovery')">
+          <span class="try-tab-icon">🔍</span> Discovery search
+        </button>
+      </div>
+
+      <!-- URL tab -->
+      <div class="try-pane active" id="tab-url" role="tabpanel" aria-labelledby="btn-url">
+        <p class="try-pane-hint">Works with Idealista, Immoscout24, Imovirtual, Fotocasa, Willhaben, and most European listing platforms.</p>
+        <div class="try-url-row">
+          <input
+            id="try-url-input"
+            class="try-input"
+            type="url"
+            placeholder="https://www.idealista.com/inmueble/…"
+            aria-label="Property listing URL"
+            onkeydown="if(event.key==='Enter')submitTry()"
+          >
+          <button class="try-submit-btn" onclick="submitTry()" aria-label="Score this property">
+            Score it <span class="try-arrow">→</span>
+          </button>
+        </div>
+        <p class="try-examples-label">Try an example:</p>
+        <div class="try-examples">
+          <button class="try-example" onclick="fillExample('https://www.idealista.com/inmueble/111852714/')">Finca El Coto · Ribadesella, Asturias</button>
+          <button class="try-example" onclick="fillExample('https://www.idealista.com/obra-nueva/105336717/')">Travesía del Mar · Gijón, Asturias</button>
+          <button class="try-example" onclick="fillExample('https://www.immoscout24.de/expose/123456')">Example · Germany (Immoscout)</button>
+        </div>
+      </div>
+
+      <!-- Discovery tab -->
+      <div class="try-pane" id="tab-discovery" role="tabpanel" aria-labelledby="btn-discovery">
+        <p class="try-pane-hint">No listing in hand? Describe what you are looking for and 9D will research the market and score matching opportunities for you.</p>
+
+        <div class="disc-grid">
+          <!-- Country -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-country">Country</label>
+            <select class="disc-select" id="disc-country">
+              <option value="">Any country</option>
+              <option value="Spain">Spain</option>
+              <option value="Portugal">Portugal</option>
+              <option value="Germany">Germany</option>
+              <option value="Austria">Austria</option>
+              <option value="Switzerland">Switzerland</option>
+              <option value="Poland">Poland</option>
+              <option value="Croatia">Croatia</option>
+              <option value="Czech Republic">Czech Republic</option>
+            </select>
+          </div>
+
+          <!-- Region / city -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-region">Region or city</label>
+            <input class="disc-input" id="disc-region" type="text" placeholder="e.g. Asturias, Munich, Lisbon">
+          </div>
+
+          <!-- Asset type -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-type">Asset type</label>
+            <select class="disc-select" id="disc-type">
+              <option value="">Any type</option>
+              <option value="apartment">Apartment</option>
+              <option value="house">House</option>
+              <option value="rural estate / finca">Rural estate or finca</option>
+              <option value="land / plot">Land or plot</option>
+              <option value="new-build">New build development</option>
+              <option value="commercial">Commercial</option>
+            </select>
+          </div>
+
+          <!-- Budget -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-budget">Budget (EUR)</label>
+            <select class="disc-select" id="disc-budget">
+              <option value="">Any budget</option>
+              <option value="under €100,000">Under €100,000</option>
+              <option value="€100,000–€250,000">€100,000 – €250,000</option>
+              <option value="€250,000–€500,000">€250,000 – €500,000</option>
+              <option value="€500,000–€1,000,000">€500,000 – €1,000,000</option>
+              <option value="€1,000,000–€3,000,000">€1,000,000 – €3,000,000</option>
+              <option value="above €3,000,000">Above €3,000,000</option>
+            </select>
+          </div>
+
+          <!-- Size -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-size">Minimum size</label>
+            <select class="disc-select" id="disc-size">
+              <option value="">Any size</option>
+              <option value="at least 40m²">40 m²</option>
+              <option value="at least 60m²">60 m²</option>
+              <option value="at least 80m²">80 m²</option>
+              <option value="at least 100m²">100 m²</option>
+              <option value="at least 150m²">150 m²</option>
+              <option value="at least 200m²">200 m²</option>
+              <option value="at least 500m²">500 m²</option>
+              <option value="at least 1 hectare">1 hectare+</option>
+            </select>
+          </div>
+
+          <!-- Bedrooms -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-beds">Bedrooms</label>
+            <select class="disc-select" id="disc-beds">
+              <option value="">Any</option>
+              <option value="1 bedroom">1</option>
+              <option value="2 bedrooms">2</option>
+              <option value="3 bedrooms">3</option>
+              <option value="4+ bedrooms">4 or more</option>
+            </select>
+          </div>
+
+          <!-- Purpose -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-purpose">Purpose</label>
+            <select class="disc-select" id="disc-purpose">
+              <option value="">Any purpose</option>
+              <option value="primary residence">Primary residence</option>
+              <option value="holiday home or second home">Holiday or second home</option>
+              <option value="rental investment (long-term)">Rental investment — long term</option>
+              <option value="rental investment (short-term / tourism)">Rental investment — short term</option>
+              <option value="value-add or distressed acquisition">Value-add or distressed acquisition</option>
+              <option value="land banking or development">Land banking or development</option>
+            </select>
+          </div>
+
+          <!-- Condition -->
+          <div class="disc-field-wrap">
+            <label class="disc-label" for="disc-condition">Condition</label>
+            <select class="disc-select" id="disc-condition">
+              <option value="">Any condition</option>
+              <option value="move-in ready or new build">Move-in ready or new build</option>
+              <option value="light renovation needed">Light renovation</option>
+              <option value="full renovation or distressed">Full renovation or distressed</option>
+              <option value="ruin or land only">Ruin or land only</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Free-text extras -->
+        <div style="margin-top:14px">
+          <label class="disc-label" for="disc-notes">Anything else (optional)</label>
+          <textarea class="disc-textarea" id="disc-notes" placeholder="Sea views, close to the coast, heritage building, motivated seller, court auction, near a specific town — anything that matters to you…"></textarea>
+        </div>
+
+        <button class="try-submit-btn" style="width:100%;margin-top:14px;justify-content:center" onclick="submitDiscovery()">
+          Find and score matching properties <span class="try-arrow">→</span>
+        </button>
+      </div>
+
+    </div><!-- /try-card -->
   </div>
 </section>
 
@@ -1452,6 +1711,65 @@ document.addEventListener('DOMContentLoaded', () => {
   initScrollAnimations();
   animateRadar();
 });
+
+
+/* ── TRY IT LOGIC ────────────────────────────────────────── */
+function switchTryTab(tab) {
+  document.querySelectorAll('.try-tab').forEach(b => {
+    b.classList.toggle('active', b.id === 'btn-' + tab);
+    b.setAttribute('aria-selected', b.id === 'btn-' + tab);
+  });
+  document.querySelectorAll('.try-pane').forEach(p => {
+    p.classList.toggle('active', p.id === 'tab-' + tab);
+  });
+}
+
+function fillExample(url) {
+  document.getElementById('try-url-input').value = url;
+  document.getElementById('try-url-input').focus();
+}
+
+function submitTry() {
+  const url = document.getElementById('try-url-input').value.trim();
+  if (!url) { document.getElementById('try-url-input').focus(); return; }
+  // Build app.html URL with the listing pre-filled as a query param
+  const dest = 'app.html?url=' + encodeURIComponent(url);
+  window.location.href = dest;
+}
+
+function submitDiscovery() {
+  const country   = document.getElementById('disc-country').value;
+  const region    = document.getElementById('disc-region').value.trim();
+  const type      = document.getElementById('disc-type').value;
+  const budget    = document.getElementById('disc-budget').value;
+  const size      = document.getElementById('disc-size').value;
+  const beds      = document.getElementById('disc-beds').value;
+  const purpose   = document.getElementById('disc-purpose').value;
+  const condition = document.getElementById('disc-condition').value;
+  const notes     = document.getElementById('disc-notes').value.trim();
+
+  // Compose a natural-language description from the form values
+  const parts = [];
+  if (type)      parts.push(type);
+  if (beds)      parts.push(beds);
+  if (size)      parts.push(size);
+  if (region)    parts.push('in ' + region);
+  if (country && country !== region) parts.push(country);
+  if (budget)    parts.push('budget ' + budget);
+  if (purpose)   parts.push('purpose: ' + purpose);
+  if (condition) parts.push('condition: ' + condition);
+  if (notes)     parts.push(notes);
+
+  if (parts.length === 0) {
+    document.getElementById('disc-region').focus();
+    return;
+  }
+
+  const description = 'Discovery search — find and score a real estate opportunity matching these criteria: ' + parts.join(', ') + '.';
+  const dest = 'app.html?discovery=' + encodeURIComponent(description);
+  window.location.href = dest;
+}
+
 </script>
 </body>
 </html>

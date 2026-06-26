@@ -856,6 +856,32 @@ function resetScore() {
   scoring = false;
 }
 
+// ── AUTO-FILL FROM MARKETING PAGE
+
+/* ── AUTO-FILL FROM MARKETING PAGE ──────────────────────── */
+(function(){
+  const params = new URLSearchParams(window.location.search);
+  const url    = params.get('url');
+  const disc   = params.get('discovery');
+
+  if (url) {
+    // Pre-fill the URL field and trigger scoring automatically
+    const field = document.getElementById('url-field');
+    if (field) {
+      field.value = url;
+      // Small delay so the UI is fully ready
+      setTimeout(() => runScoring(), 400);
+    }
+  } else if (disc) {
+    // Pre-fill the description field and trigger scoring automatically
+    const field = document.getElementById('desc-field');
+    if (field) {
+      field.value = disc;
+      setTimeout(() => runScoring(), 400);
+    }
+  }
+})();
+
 // ── INIT ───────────────────────────────────────────────────────────
 updateCounts();
 </script>
