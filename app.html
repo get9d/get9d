@@ -1164,25 +1164,39 @@ function resetScore() {
 
 // ── DISCOVERY MODE ─────────────────────────────────────────────────────
 async function runDiscovery(criteria) {
+  // Guard: prevent double-firing
+  if (scoring) return;
+
   // Freemium gate — block if at limit
   if (getUsageCount() >= 5) {
-    document.getElementById('input-panel').style.display = 'none';
-    const panel = document.getElementById('scorecard-panel');
-    panel.innerHTML = `
-      <div style="text-align:center;margin-bottom:12px"><span class="usage-badge usage-locked">🔒 Preview limit reached</span></div>
-      ${freemiumBannerHtml('gated')}
-      <div style="text-align:center;margin-top:12px">
-        <button class="btn-ghost" onclick="document.getElementById('scorecard-panel').style.display='none';document.getElementById('input-panel').style.display='block';">← Back</button>
-      </div>`;
-    panel.style.display = 'block';
+    const ip = document.getElementById('input-panel');
+    const sp = document.getElementById('scorecard-panel');
+    if (ip) ip.style.display = 'none';
+    if (sp) {
+      sp.innerHTML = `
+        <div style="text-align:center;margin-bottom:12px"><span class="usage-badge usage-locked">🔒 Preview limit reached</span></div>
+        ${freemiumBannerHtml('gated')}
+        <div style="text-align:center;margin-top:12px">
+          <button class="btn-ghost" onclick="document.getElementById('scorecard-panel').style.display='none';document.getElementById('input-panel').style.display='block';">← Back</button>
+        </div>`;
+      sp.style.display = 'block';
+    }
     return;
   }
+
   scoring = true;
-  document.getElementById('score-btn').disabled = true;
-  document.getElementById('btn-text').textContent = 'Searching…';
-  document.getElementById('input-panel').style.display = 'none';
-  document.getElementById('err-box').style.display = 'none';
-  document.getElementById('scorecard-panel').style.display = 'none';
+
+  // Safe DOM updates — these elements may not exist when called from auto-fill
+  const scoreBtn  = document.getElementById('score-btn');
+  const btnText   = document.getElementById('btn-text');
+  const inputPanel  = document.getElementById('input-panel');
+  const errBox      = document.getElementById('err-box');
+  const scorecardPanel = document.getElementById('scorecard-panel');
+  if (scoreBtn)  scoreBtn.disabled = true;
+  if (btnText)   btnText.textContent = 'Searching…';
+  if (inputPanel)  inputPanel.style.display = 'none';
+  if (errBox)      errBox.style.display = 'none';
+  if (scorecardPanel) scorecardPanel.style.display = 'none';
 
   const pp = document.getElementById('progress-panel');
   pp.style.display = 'block';
@@ -1258,14 +1272,19 @@ async function runDiscovery(criteria) {
     panel.scrollIntoView({ behavior: 'smooth' });
 
   } catch(err) {
-    showErr('Discovery search failed: ' + err.message);
-    pp.style.display = 'none';
-    document.getElementById('input-panel').style.display = 'block';
+    const eb = document.getElementById('err-box');
+    if (eb) { eb.textContent = 'Discovery search failed: ' + err.message; eb.style.display = 'block'; }
+    if (pp) pp.style.display = 'none';
+    const ip2 = document.getElementById('input-panel');
+    if (ip2) ip2.style.display = 'block';
+  } finally {
+    // Always reset — runs whether search succeeded, failed, or was interrupted
+    scoring = false;
+    const sb = document.getElementById('score-btn');
+    const bt = document.getElementById('btn-text');
+    if (sb) sb.disabled = false;
+    if (bt) bt.textContent = 'Score this property';
   }
-
-  scoring = false;
-  document.getElementById('score-btn').disabled = false;
-  document.getElementById('btn-text').textContent = 'Score this property';
 }
 
 function renderDiscovery(data, container) {
