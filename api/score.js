@@ -1,10 +1,8 @@
 // Vercel serverless function — Anthropic API proxy
 // Keeps the API key server-side, away from the browser
 
-// Extend Vercel's default 10-second timeout to 60 seconds.
-// Required because Anthropic calls with web search can take 30–60 seconds.
 export const config = {
-  maxDuration: 60,
+  maxDuration: 60,  // Maximum allowed on Vercel Hobby plan
 };
 
 export default async function handler(req, res) {
@@ -14,10 +12,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // API key is stored in Vercel → Settings → Environment Variables
-  // as ANTHROPIC_API_KEY — never hardcode it here
   const apiKey = process.env.ANTHROPIC_API_KEY;
-
   if (!apiKey) {
     return res.status(500).json({
       error: 'API key not configured',
@@ -26,7 +21,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Forward the request body to Anthropic exactly as received from the browser
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -40,12 +34,10 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
-    // Set CORS headers so the browser accepts the response
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    // Forward Anthropic's status and response back to the browser
     return res.status(response.status).json(data);
 
   } catch (error) {
