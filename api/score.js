@@ -293,26 +293,15 @@ async function fetchListings(searchParams) {
 }
 
 // ─── Perplexity fallback ───────────────────────────────────────────────────
+// ─── Perplexity Sonar fallback (reserved — not yet active) ───────────────
+// Will be activated once Perplexity API key is configured.
+// Replaces Claude web-search fallback to prevent hallucination.
 async function fetchPerplexityListings(searchParams) {
-  const pplxKey = process.env.PERPLEXITY_API_KEY;
-  if (!pplxKey) return [];
-  const { location, propertyType, minPrice, maxPrice, minRooms } = searchParams;
-  const query = `Real estate listings for ${propertyType === 'rent' ? 'rent' : 'sale'} in ${location}.`
-    + (minPrice || maxPrice ? ` Price: ${minPrice||0}–${maxPrice||'any'}.` : '')
-    + (minRooms ? ` Min ${minRooms} rooms/beds.` : '')
-    + ' List 5–8 CURRENT real listings with: name, full address, price + currency, rooms, m² or sqft, listing URL. Cite only live web sources.';
-  try {
-    const res = await fetch('https://api.perplexity.ai/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${pplxKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'sonar', messages: [{ role: 'user', content: query }] }),
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const text = data.choices?.[0]?.message?.content || '';
-    const citations = data.citations || [];
-    return [{ title: `Web search: ${location}`, address: location, price: null, priceUnit: null, rooms: null, livingArea: null, floor: null, yearBuilt: null, listingUrl: citations[0]||null, description: text.slice(0,1500), images: [], source: `perplexity.ai — ${citations.slice(0,3).join(', ')}`, extras: { rawCitations: citations } }];
-  } catch { return []; }
+  // RESERVED FOR FUTURE INTEGRATION
+  // const pplxKey = process.env.PERPLEXITY_API_KEY;
+  // if (!pplxKey) return [];
+  // ... Perplexity Sonar call goes here
+  return [];
 }
 
 // ─── D9 legal rules per market ─────────────────────────────────────────────
@@ -390,6 +379,122 @@ Respond ONLY in valid JSON — no preamble, no markdown fences:
 {"results":[{"rank":1,"title":"...","address":"...","price":0,"priceUnit":"${currency}","listingUrl":"...","source":"...","compositeScore":7.4,"suppressed":false,"suppressionReason":null,"dimensions":{"D1":{"score":7.0,"label":"Valuation & Renovation","rationale":"..."},"D2":{"score":7.5,"label":"Climate Risk","rationale":"..."},"D3":{"score":7.5,"label":"Demographic Trend","rationale":"..."},"D4":{"score":6.0,"label":"Return on Investment","rationale":"..."},"D5":{"score":7.0,"label":"Rental & Vacancy","rationale":"..."},"D6":{"score":9.0,"label":"Liveability & Proximity","rationale":"..."},"D7":{"score":7.5,"label":"Appreciation Potential","rationale":"..."},"D8":{"score":6.5,"label":"Seller Motivation","rationale":"..."},"D9":{"score":8.0,"label":"Legal & Regulatory","rationale":"..."}},"flags":[],"summary":"Two-sentence investment thesis."}],"searchMeta":{"location":"${searchParams.location}","market":"${market}","listingsFound":${listings.length},"dataSource":"live portal data via Apify","scoredAt":"${new Date().toISOString()}"}}`;
 }
 
+
+// ─── URL-based single listing scrapers ────────────────────────────────────
+// These accept a specific listing URL and return its full details.
+// Separate from the search scrapers — used when user pastes a portal URL.
+const URL_SCRAPER_MAP = {
+  // Switzerland
+  'homegate.ch':       { actorId: 'ducto/homegate-property-scraper',          inputKey: 'startUrls' },
+  'immoscout24.ch':    { actorId: 'ecomscrape/immoscout24-property-details-scraper', inputKey: 'startUrls' },
+  'comparis.ch':       { actorId: 'agenscrape/comparis-ch-real-estate-scraper', inputKey: 'startUrls' },
+  // Germany
+  'immoscout24.de':    { actorId: 'clearpath/immoscout24-detail-listing-scraper', inputKey: 'startUrls' },
+  'immobilienscout24.de': { actorId: 'clearpath/immoscout24-detail-listing-scraper', inputKey: 'startUrls' },
+  'immowelt.de':       { actorId: 'rigelbytes/immowelt-scraper',               inputKey: 'startUrls' },
+  // Austria
+  'willhaben.at':      { actorId: 'jupri/willhaben-scraper',                   inputKey: 'startUrls' },
+  // Southern Europe
+  'idealista.com':     { actorId: 'blackfalcondata/idealista-scraper',         inputKey: 'startUrls' },
+  'idealista.pt':      { actorId: 'blackfalcondata/idealista-scraper',         inputKey: 'startUrls' },
+  'idealista.it':      { actorId: 'blackfalcondata/idealista-scraper',         inputKey: 'startUrls' },
+  // France
+  'seloger.com':       { actorId: 'lexis-solutions/seloger-scraper',           inputKey: 'startUrls' },
+  'leboncoin.fr':      { actorId: 'ccdeveloppement/real-estate-scraper',       inputKey: 'startUrls' },
+  // UK
+  'rightmove.co.uk':   { actorId: 'vulnv/rightmove-scraper',                  inputKey: 'startUrls' },
+  'zoopla.co.uk':      { actorId: 'femstar/uk-property-data-scraper-rightmove-zoopla', inputKey: 'startUrls' },
+  // USA
+  'zillow.com':        { actorId: 'maxcopell/zillow-scraper',                  inputKey: 'urls' },
+  'realtor.com':       { actorId: 'jp_ishac/us-real-estate-listings-scraper',  inputKey: 'startUrls' },
+  'redfin.com':        { actorId: 'whitewalk/real-estate-scraper',             inputKey: 'startUrls' },
+  // Canada
+  'realtor.ca':        { actorId: 'scrapemind/realtor-ca-scraper',             inputKey: 'startUrls' },
+  // UAE
+  'propertyfinder.ae': { actorId: 'parseforge/propertyfinder-uae-scraper',     inputKey: 'startUrls' },
+  'bayut.com':         { actorId: 'ecomscrape/bayut-property-details-scraper', inputKey: 'startUrls' },
+  'dubizzle.com':      { actorId: 'dhrumil/propertyfinder-scraper',            inputKey: 'startUrls' },
+  // Australia
+  'domain.com.au':     { actorId: 'stealth_mode/domain-property-details-scraper', inputKey: 'startUrls' },
+  'realestate.com.au': { actorId: 'one-api/realestate-com-au-scraper',         inputKey: 'startUrls' },
+  // Brazil
+  'vivareal.com.br':   { actorId: 'jungle_synthesizer/brazil-vivareal-zap-imoveis-scraper', inputKey: 'startUrls' },
+  'zapimoveis.com.br': { actorId: 'jungle_synthesizer/brazil-vivareal-zap-imoveis-scraper', inputKey: 'startUrls' },
+  // Mexico
+  'inmuebles24.com':   { actorId: 'ecomscrape/inmuebles24-property-listings-scraper', inputKey: 'startUrls' },
+  // Southeast Asia
+  'propertyguru.com.sg': { actorId: 'alwaysprimedev/propertyguru-singapore-scraper', inputKey: 'startUrls' },
+  'propertyguru.com.my': { actorId: 'alwaysprimedev/propertyguru-singapore-scraper', inputKey: 'startUrls' },
+  'ddproperty.com':    { actorId: 'fatihtahta/ddproperty-scraper',             inputKey: 'startUrls' },
+  // South Africa
+  'property24.com':    { actorId: 'getascraper/property24-scraper',            inputKey: 'startUrls' },
+};
+
+function getHostname(url) {
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); }
+  catch(e) { return null; }
+}
+
+async function fetchListingByUrl(listingUrl, countryCode) {
+  const apifyToken = process.env.APIFY_TOKEN;
+  if (!apifyToken) throw new Error('APIFY_TOKEN not configured.');
+
+  const host = getHostname(listingUrl);
+  const scraper = host ? URL_SCRAPER_MAP[host] : null;
+
+  if (!scraper) {
+    throw new Error(`No URL scraper configured for ${host || listingUrl}`);
+  }
+
+  const input = {
+    [scraper.inputKey]: [{ url: listingUrl }],
+    maxItems: 1,
+  };
+
+  const res = await fetch(
+    `https://api.apify.com/v2/acts/${scraper.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
+  );
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Apify scraper ${scraper.actorId} returned ${res.status}: ${errText.slice(0,200)}`);
+  }
+
+  const items = await res.json();
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error(`Scraper returned no data for ${listingUrl}`);
+  }
+
+  // Normalise using market portal config if available
+  const market = countryCode || detectMarket(listingUrl, '');
+  const portals = PORTAL_CONFIG[market] ? resolvePortals(market, {}) : null;
+  const portal = portals?.[0];
+
+  let listing;
+  try {
+    listing = portal ? portal.normalise(items[0]) : {
+      title: items[0].title || items[0].name || items[0].address || 'Property',
+      address: items[0].address || items[0].location || '',
+      price: items[0].price || items[0].listPrice || null,
+      priceUnit: items[0].currency || items[0].priceUnit || null,
+      rooms: items[0].rooms || items[0].bedrooms || items[0].numberOfRooms || null,
+      livingArea: items[0].livingArea || items[0].area || items[0].size || null,
+      floor: items[0].floor || null,
+      yearBuilt: items[0].yearBuilt || items[0].constructionYear || null,
+      listingUrl: listingUrl,
+      description: (items[0].description || '').slice(0, 500) || null,
+      images: items[0].images?.slice(0,2) || items[0].imageUrls?.slice(0,2) || [],
+      source: host || 'portal',
+      extras: {},
+    };
+  } catch(e) {
+    listing = { title: 'Property', address: '', price: null, priceUnit: null, rooms: null, livingArea: null, floor: null, yearBuilt: null, listingUrl, description: JSON.stringify(items[0]).slice(0,500), images: [], source: host || 'portal', extras: {} };
+  }
+
+  return { listing, market };
+}
+
 // ─── Main handler ──────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
@@ -419,6 +524,52 @@ export default async function handler(req, res) {
     } catch (e) { return res.status(500).json({ error: 'Proxy failed', detail: e.message }); }
   }
 
+  // ── URL mode: scrape a specific listing URL then score it ──────────────
+  if (body.mode === 'url') {
+    const { listingUrl, countryCode, model } = body;
+    if (!listingUrl) return res.status(400).json({ error: 'listingUrl is required for url mode' });
+
+    const scoringModel = ALLOWED_MODELS.includes(model) ? model : 'claude-sonnet-4-6';
+
+    let listing, market;
+    try {
+      const result = await fetchListingByUrl(listingUrl, countryCode);
+      listing = result.listing;
+      market = result.market;
+    } catch (err) {
+      return res.status(200).json({
+        error: 'url_scrape_failed',
+        message: `Could not fetch listing data from ${listingUrl}: ${err.message}`,
+        fallback: 'Please paste the listing details manually in the description field.',
+      });
+    }
+
+    // Build single-listing scoring prompt
+    const searchParams = { location: listing.address || listingUrl, propertyType: 'buy', countryCode };
+    const singleListingPrompt = buildScoringPrompt([listing], searchParams, market);
+
+    try {
+      const ar = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: scoringModel, max_tokens: MAX_TOKENS_CAP, messages: [{ role: 'user', content: singleListingPrompt }] }),
+      });
+      const ad = await ar.json();
+      if (!ar.ok) return res.status(ar.status).json({ error: 'Scoring failed', detail: ad });
+
+      const rawText = ad.content?.[0]?.text || '';
+      let scored;
+      try { scored = JSON.parse(rawText.replace(/```json|```/g,'').trim()); }
+      catch { return res.status(500).json({ error: 'Failed to parse scoring response', raw: rawText }); }
+
+      scored.rawListings = [listing];
+      scored.mode = 'url';
+      return res.status(200).json(scored);
+    } catch (e) {
+      return res.status(500).json({ error: 'Scoring failed', detail: e.message });
+    }
+  }
+
   // ── Score mode (main 9D flow)
   if (body.mode === 'score') {
     const { location, minPrice, maxPrice, minRooms, maxRooms, propertyType, countryCode, model } = body;
@@ -434,12 +585,17 @@ export default async function handler(req, res) {
       const result = await fetchListings(searchParams);
       listings = result.listings || [];
       portalErrors = result.portalErrors || [];
-      if (result.noActor || listings.length === 0) {
-        listings = await fetchPerplexityListings(searchParams);
-        usedFallback = true;
+      // NOTE: Perplexity Sonar fallback reserved for future integration.
+      // No Claude fallback — would cause hallucination.
+      if (result.noActor) {
+        return res.status(200).json({
+          error: 'market_not_supported',
+          message: `Live portal data is not yet available for this market. Perplexity Sonar integration coming soon.`,
+          market, results: [],
+          searchMeta: { location, market, listingsFound: 0, dataSource: 'none', scoredAt: new Date().toISOString() },
+        });
       }
     } catch (err) {
-      try { listings = await fetchPerplexityListings(searchParams); usedFallback = true; } catch { listings = []; }
       portalErrors.push(err.message);
     }
 
