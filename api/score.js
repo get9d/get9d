@@ -1,4 +1,5 @@
-// get9d.com — 9D Property Scoring Engine v4.1 FINAL (Global — Verified + Validated)
+// get9d.com — 9D Property Scoring Engine v4.2 (Global — Verified + Validated + Auctions)
+// dealType "auction": DE ZVG-Portal foreclosures + ES BOE.es judicial auctions
 // All Apify actor IDs verified against live Apify Store pages July 2026.
 // Server-side output validation: results must trace to real scraped listings.
 // NO Claude/Perplexity fallback — hard fail prevents hallucination.
@@ -387,6 +388,166 @@ const URL_SCRAPER_MAP = {
   'property24.com':          { actorId: 'agentx/property24-property-scraper', inputKey: 'startUrls' },
 };
 
+
+// ─── AUCTION / DISTRESSED REGISTRY ────────────────────────────────────────
+// Court foreclosure auctions — separate channel from regular listings.
+// DE: ZVG-Portal (Zwangsversteigerungen) | ES: BOE.es (subastas judiciales)
+// AT: Ediktsdatei insolvency/court publications (name or Bundesland search)
+const AUCTION_CONFIG = {
+  DE: {
+    name: 'ZVG-Portal (Zwangsversteigerungen)',
+    actorId: 'signalflow/zvg-portal-scraper',
+    // Input: bundesland filter (e.g. "Bayern", "Berlin"). Maps city → Bundesland where possible.
+    buildInput: (p) => {
+      const BUNDESLAND_MAP = {
+        'berlin':'Berlin','münchen':'Bayern','munich':'Bayern','hamburg':'Hamburg',
+        'frankfurt':'Hessen','köln':'Nordrhein-Westfalen','cologne':'Nordrhein-Westfalen',
+        'stuttgart':'Baden-Württemberg','düsseldorf':'Nordrhein-Westfalen',
+        'leipzig':'Sachsen','dresden':'Sachsen','hannover':'Niedersachsen',
+        'bremen':'Bremen','nürnberg':'Bayern','dortmund':'Nordrhein-Westfalen',
+        'essen':'Nordrhein-Westfalen','bonn':'Nordrhein-Westfalen',
+        'bayern':'Bayern','hessen':'Hessen','sachsen':'Sachsen',
+        'baden-württemberg':'Baden-Württemberg','nordrhein-westfalen':'Nordrhein-Westfalen',
+        'niedersachsen':'Niedersachsen','brandenburg':'Brandenburg',
+        'thüringen':'Thüringen','rheinland-pfalz':'Rheinland-Pfalz',
+        'schleswig-holstein':'Schleswig-Holstein','saarland':'Saarland',
+        'mecklenburg-vorpommern':'Mecklenburg-Vorpommern','sachsen-anhalt':'Sachsen-Anhalt',
+      };
+      const locLower = (p.location || '').toLowerCase();
+      let bundesland = null;
+      for (const [key, bl] of Object.entries(BUNDESLAND_MAP)) {
+        if (locLower.includes(key)) { bundesland = bl; break; }
+      }
+      return {
+        ...(bundesland && { bundesland }),
+        maxItems: 15,
+      };
+    },
+    normalise: (i) => {
+      const verkehrswert = i.verkehrswert || i.marketValue || i.market_value || null;
+      const minBid = i.minBid || i.mindestgebot || i.min_bid_50 || (verkehrswert ? Math.round(verkehrswert * 0.5) : null);
+      const safetyMargin = i.safetyMargin || i.sicherheitsgrenze || i.safety_70 || (verkehrswert ? Math.round(verkehrswert * 0.7) : null);
+      return {
+        title: `[AUKTION] ${i.title || i.objektArt || i.object_type || 'Zwangsversteigerung'}`,
+        address: i.address || i.adresse || i.lage || '',
+        price: verkehrswert,
+        priceUnit: 'EUR',
+        rooms: i.rooms || null,
+        livingArea: i.area || i.wohnflaeche || null,
+        floor: null,
+        yearBuilt: i.yearBuilt || i.baujahr || null,
+        listingUrl: i.url || i.detailUrl || 'https://www.zvg-portal.de',
+        description: [
+          `GERICHTLICHE ZWANGSVERSTEIGERUNG.`,
+          verkehrswert ? `Verkehrswert (court-assessed market value): EUR ${verkehrswert.toLocaleString?.() || verkehrswert}.` : '',
+          minBid ? `Legal minimum bid (50% rule): EUR ${minBid.toLocaleString?.() || minBid}.` : '',
+          safetyMargin ? `Creditor objection threshold (70% rule): EUR ${safetyMargin.toLocaleString?.() || safetyMargin}.` : '',
+          i.terminDatum || i.auctionDate ? `Auction date: ${i.terminDatum || i.auctionDate}.` : '',
+          i.amtsgericht || i.court ? `Court: ${i.amtsgericht || i.court}.` : '',
+          i.aktenzeichen || i.caseNumber ? `Case number: ${i.aktenzeichen || i.caseNumber}.` : '',
+          (i.description || i.objektBeschreibung || '').slice(0, 250),
+        ].filter(Boolean).join(' '),
+        images: [],
+        source: 'zvg-portal.de',
+        extras: {
+          dealType: 'auction',
+          verkehrswert,
+          minBid50: minBid,
+          safetyMargin70: safetyMargin,
+          auctionDate: i.terminDatum || i.auctionDate || null,
+          court: i.amtsgericht || i.court || null,
+          caseNumber: i.aktenzeichen || i.caseNumber || null,
+        },
+      };
+    },
+  },
+
+  ES: {
+    name: 'BOE.es Subastas (Spanish judicial auctions)',
+    actorId: 'signalflow/spain-auction-scout',
+    buildInput: (p) => ({
+      location: p.location || '',
+      maxItems: 15,
+    }),
+    normalise: (i) => {
+      const valuation = i.valoracion || i.valuation || i.marketValue || null;
+      return {
+        title: `[SUBASTA] ${i.title || i.tipo || 'Subasta judicial'}`,
+        address: i.address || i.direccion || i.localidad || '',
+        price: valuation,
+        priceUnit: 'EUR',
+        rooms: null,
+        livingArea: i.area || i.superficie || null,
+        floor: null,
+        yearBuilt: null,
+        listingUrl: i.url || 'https://subastas.boe.es',
+        description: [
+          `SUBASTA JUDICIAL (Spanish court auction).`,
+          valuation ? `Court valuation: EUR ${valuation.toLocaleString?.() || valuation}.` : '',
+          i.cargas ? `Registered charges (cargas): ${i.cargas}.` : '',
+          i.refCatastral || i.cadastralRef ? `Cadastral ref: ${i.refCatastral || i.cadastralRef}.` : '',
+          i.fechaFin || i.endDate ? `Auction closes: ${i.fechaFin || i.endDate}.` : '',
+          (i.description || '').slice(0, 250),
+        ].filter(Boolean).join(' '),
+        images: [],
+        source: 'subastas.boe.es',
+        extras: {
+          dealType: 'auction',
+          valuation,
+          cargas: i.cargas || null,
+          cadastralRef: i.refCatastral || i.cadastralRef || null,
+          auctionEnd: i.fechaFin || i.endDate || null,
+        },
+      };
+    },
+  },
+
+  // AT Ediktsdatei is insolvency-publication based (searches by debtor name or Bundesland),
+  // not property-search based — reserved for a dedicated insolvency-monitoring feature.
+  AT: null,
+};
+
+// ─── Fetch auction listings ────────────────────────────────────────────────
+async function fetchAuctionListings(searchParams) {
+  const apifyToken = process.env.APIFY_TOKEN;
+  if (!apifyToken) throw new Error('APIFY_TOKEN not configured.');
+
+  const market = detectMarket(searchParams.location, searchParams.countryCode || '');
+  const auctionSource = AUCTION_CONFIG[market];
+
+  if (!auctionSource) {
+    return { listings: [], market, noActor: true, reason: `Court auction data is currently available for Germany (ZVG-Portal) and Spain (BOE.es). Market ${market} auction coverage is coming soon.` };
+  }
+
+  const input = auctionSource.buildInput(searchParams);
+  const res = await fetch(
+    `https://api.apify.com/v2/acts/${auctionSource.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
+  );
+
+  if (!res.ok) {
+    throw new Error(`${auctionSource.name} returned ${res.status} ${res.statusText}`);
+  }
+
+  const items = await res.json();
+  if (!Array.isArray(items) || items.length === 0) {
+    return { listings: [], market, portalErrors: [] };
+  }
+
+  const listings = items.slice(0, 15).map(item => {
+    try { return auctionSource.normalise(item); } catch { return null; }
+  }).filter(Boolean);
+
+  // Filter by price range against Verkehrswert if provided
+  const filtered = listings.filter(l => {
+    if (searchParams.minPrice && l.price && l.price < searchParams.minPrice) return false;
+    if (searchParams.maxPrice && l.price && l.price > searchParams.maxPrice) return false;
+    return true;
+  });
+
+  return { listings: filtered, market, portalErrors: [] };
+}
+
 // ─── Market detection ──────────────────────────────────────────────────────
 // Two-pass: (1) explicit countryCode, (2) full country names, (3) major cities,
 // (4) two-letter codes ONLY as ", xx" suffix — prevents "Ciudad de Mexico" → DE bug.
@@ -709,8 +870,18 @@ function validateScoredOutput(scored, realListings) {
 }
 
 // ─── Build scoring prompt ──────────────────────────────────────────────────
-function buildScoringPrompt(listings, searchParams, market) {
+function buildScoringPrompt(listings, searchParams, market, isAuction = false) {
   const currency = CURRENCY_MAP[market] || 'USD';
+
+  const auctionGuidance = isAuction ? `
+
+AUCTION-SPECIFIC SCORING GUIDANCE (these are COURT FORECLOSURE AUCTIONS, not regular listings):
+- The listed "price" is the court-assessed Verkehrswert/valuation, NOT an asking price. Acquisition below this value is the core opportunity.
+- D1 Valuation: Score the SPREAD — legal minimum bid is 50% of Verkehrswert; creditor objection threshold is 70%. Realistic acquisition at 60-75% of Verkehrswert is a strong D1 signal (8+).
+- D8 Seller Motivation: Foreclosures are maximum-motivation by definition — score execution risk instead: competing bidders, creditor behaviour, possible auction withdrawal.
+- D9 Legal: Add auction-specific risks — no warranty (gekauft wie gesehen), no interior viewing before auction, occupants/tenants (Raeumung risk), surviving charges (Sicherungshypotheken), 10% security deposit due at auction.
+- Flag prominently: interior condition is UNKNOWN in most foreclosures. Renovation estimates must be conservative.
+- Composite for auctions rewards deep value spreads but must reflect execution and condition uncertainty.` : '';
 
   const listingsSummary = listings.map((l, i) => `
 LISTING ${i+1}:
@@ -743,7 +914,7 @@ D8 Seller Motivation — Days on market, price reductions, listing urgency
 D9 Legal & Regulatory — ${D9_RULES[market] || 'Local property law, title integrity, AML compliance'}
 
 SUPPRESSION RULE: Any D9 sub-score < 3.0 → cap composite at 5.0, flag prominently.
-COMPOSITE: D1×15% + D2×10% + D3×10% + D4×15% + D5×10% + D6×10% + D7×10% + D8×10% + D9×10%
+COMPOSITE: D1×15% + D2×10% + D3×10% + D4×15% + D5×10% + D6×10% + D7×10% + D8×10% + D9×10%${auctionGuidance}
 
 SEARCH: ${market} | ${searchParams.location} | ${searchParams.propertyType==='rent'?'Rental':'Purchase'}${searchParams.minPrice?` | Min ${currency} ${searchParams.minPrice}`:''}${searchParams.maxPrice?` | Max ${currency} ${searchParams.maxPrice}`:''}${searchParams.minRooms?` | Min rooms: ${searchParams.minRooms}`:''}
 
@@ -751,7 +922,7 @@ REAL LISTINGS (${listings.length}):
 ${listingsSummary}
 
 Respond ONLY in valid JSON — no preamble, no markdown fences:
-{"results":[{"rank":1,"title":"...","address":"...","price":0,"priceUnit":"${currency}","listingUrl":"...","source":"...","compositeScore":7.4,"suppressed":false,"suppressionReason":null,"dimensions":{"D1":{"score":7.0,"label":"Valuation & Renovation","rationale":"..."},"D2":{"score":7.5,"label":"Climate Risk","rationale":"..."},"D3":{"score":7.5,"label":"Demographic Trend","rationale":"..."},"D4":{"score":6.0,"label":"Return on Investment","rationale":"..."},"D5":{"score":7.0,"label":"Rental & Vacancy","rationale":"..."},"D6":{"score":9.0,"label":"Liveability & Proximity","rationale":"..."},"D7":{"score":7.5,"label":"Appreciation Potential","rationale":"..."},"D8":{"score":6.5,"label":"Seller Motivation","rationale":"..."},"D9":{"score":8.0,"label":"Legal & Regulatory","rationale":"..."}},"flags":[],"summary":"Two-sentence investment thesis."}],"searchMeta":{"location":"${searchParams.location}","market":"${market}","listingsFound":${listings.length},"dataSource":"live portal data via Apify","scoredAt":"${new Date().toISOString()}"}}`;
+{"results":[{"rank":1,"title":"...","address":"...","price":0,"priceUnit":"${currency}","listingUrl":"...","source":"...","compositeScore":7.4,"suppressed":false,"suppressionReason":null,"dimensions":{"D1":{"score":7.0,"label":"Valuation & Renovation","rationale":"..."},"D2":{"score":7.5,"label":"Climate Risk","rationale":"..."},"D3":{"score":7.5,"label":"Demographic Trend","rationale":"..."},"D4":{"score":6.0,"label":"Return on Investment","rationale":"..."},"D5":{"score":7.0,"label":"Rental & Vacancy","rationale":"..."},"D6":{"score":9.0,"label":"Liveability & Proximity","rationale":"..."},"D7":{"score":7.5,"label":"Appreciation Potential","rationale":"..."},"D8":{"score":6.5,"label":"Seller Motivation","rationale":"..."},"D9":{"score":8.0,"label":"Legal & Regulatory","rationale":"..."}},"flags":[],"summary":"Two-sentence investment thesis."}],"searchMeta":{"location":"${searchParams.location}","market":"${market}","listingsFound":${listings.length},"dataSource":"${isAuction ? 'court auction data via Apify (ZVG/BOE)' : 'live portal data via Apify'}","scoredAt":"${new Date().toISOString()}"}}`;
 }
 
 // ─── Main handler ──────────────────────────────────────────────────────────
@@ -828,24 +999,28 @@ export default async function handler(req, res) {
   }
 
   // ── Score mode: search by location and score results
+  // dealType: 'standard' (default, portal listings) | 'auction' (court foreclosures)
   if (body.mode === 'score') {
-    const { location, minPrice, maxPrice, minRooms, maxRooms, propertyType, countryCode, model } = body;
+    const { location, minPrice, maxPrice, minRooms, maxRooms, propertyType, countryCode, model, dealType } = body;
     if (!location) return res.status(400).json({ error: 'location is required' });
 
     const scoringModel = ALLOWED_MODELS.includes(model) ? model : 'claude-sonnet-4-6';
     const searchParams = { location, minPrice, maxPrice, minRooms, maxRooms, propertyType, countryCode };
     const market = detectMarket(location, countryCode || '');
+    const isAuction = dealType === 'auction';
 
     let listings = [], portalErrors = [];
 
     try {
-      const result = await fetchListings(searchParams);
+      const result = isAuction
+        ? await fetchAuctionListings(searchParams)
+        : await fetchListings(searchParams);
       listings = result.listings || [];
       portalErrors = result.portalErrors || [];
 
       if (result.noActor) {
         return res.status(200).json({
-          error: 'market_not_supported',
+          error: isAuction ? 'auction_market_not_supported' : 'market_not_supported',
           message: result.reason || `Live portal data is not yet available for this market. Perplexity Sonar integration coming soon.`,
           market, results: [],
           searchMeta: { location, market, listingsFound: 0, dataSource: 'none', scoredAt: new Date().toISOString() },
@@ -858,7 +1033,9 @@ export default async function handler(req, res) {
     if (listings.length === 0) {
       return res.status(200).json({
         error: 'no_listings_found',
-        message: `No listings found for "${location}". Try a larger city, broader price range, or fewer filters.`,
+        message: isAuction
+          ? `No court auctions currently listed for "${location}". Auction inventory changes weekly — try a whole Bundesland (e.g. "Bayern") or check back soon.`
+          : `No listings found for "${location}". Try a larger city, broader price range, or fewer filters.`,
         market, portalErrors, results: [],
         searchMeta: { location, market, listingsFound: 0, dataSource: 'none — hallucination prevention active', scoredAt: new Date().toISOString() },
       });
@@ -868,7 +1045,7 @@ export default async function handler(req, res) {
       const ar = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01' },
-        body: JSON.stringify({ model: scoringModel, max_tokens: MAX_TOKENS_CAP, messages: [{ role: 'user', content: buildScoringPrompt(listings, searchParams, market) }] }),
+        body: JSON.stringify({ model: scoringModel, max_tokens: MAX_TOKENS_CAP, messages: [{ role: 'user', content: buildScoringPrompt(listings, searchParams, market, isAuction) }] }),
       });
       const ad = await ar.json();
       if (!ar.ok) return res.status(ar.status).json({ error: 'Scoring failed', detail: ad });
