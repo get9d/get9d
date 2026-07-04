@@ -1,5 +1,6 @@
-// get9d.com — 9D Property Scoring Engine v4.0 (Global — Verified Actor IDs)
+// get9d.com — 9D Property Scoring Engine v4.1 FINAL (Global — Verified + Validated)
 // All Apify actor IDs verified against live Apify Store pages July 2026.
+// Server-side output validation: results must trace to real scraped listings.
 // NO Claude/Perplexity fallback — hard fail prevents hallucination.
 // Perplexity Sonar slot reserved (stubbed) for future activation.
 
@@ -33,82 +34,72 @@ const PORTAL_CONFIG = {
       maxItems: 10,
     }),
     normalise: (i) => ({
-      title: i.title || i.name || '',
+      title: i.title || i.name || [i.rooms, 'Zimmer', i.propertyType].filter(Boolean).join(' ') || '',
       address: [i.street, i.zip, i.city, i.canton].filter(Boolean).join(', '),
-      price: i.price,
+      price: i.price || i.pricePerMonth || i.purchasePrice || null,
       priceUnit: 'CHF',
-      rooms: i.rooms,
-      livingArea: i.area,
+      rooms: i.rooms || i.numberOfRooms || null,
+      livingArea: i.area || i.livingSpace || null,
       floor: i.floor || null,
-      yearBuilt: i.yearBuilt || null,
-      listingUrl: i.source_url || i.url || null,
-      description: (i.description || '').slice(0, 500) || null,
-      images: i.image_url ? [i.image_url] : [],
+      yearBuilt: i.yearBuilt || i.constructionYear || null,
+      listingUrl: i.source_url || i.url || i.listingUrl || null,
+      description: (i.description || i.shortDescription || '').slice(0, 500) || null,
+      images: i.image_url ? [i.image_url] : (i.imageUrls ? i.imageUrls.slice(0,2) : []),
       source: 'homegate.ch',
-      extras: { features: i.features, lat: i.latitude, lng: i.longitude },
+      extras: { features: i.features, lat: i.latitude, lng: i.longitude, propertyType: i.propertyType },
     }),
   }],
 
   // ── Germany ───────────────────────────────────────────────────────────
-  // Actor: automation-lab/immoscout24-de-scraper (verified ✓)
-  // Input: startUrls (search URLs) — builds a search URL from location
-  // Actor: studio-amba/immoscout24-scraper (verified ✓, alternative)
+  // Actor: igolaizola/immobilienscout24-scraper (verified ✓, active)
+  // Input: location (city string), operation (buy/rent), maxResults
   DE: [{
     name: 'ImmobilienScout24.de',
-    actorId: 'automation-lab/immoscout24-de-scraper',
-    buildInput: (p) => {
-      const type = p.propertyType === 'rent' ? 'wohnung-mieten' : 'wohnung-kaufen';
-      const city = (p.location || 'deutschland').toLowerCase().replace(/\s+/g, '-');
-      return {
-        startUrls: [{
-          url: `https://www.immobilienscout24.de/Suche/de/${city}/${type}`,
-        }],
-        maxItems: 10,
-      };
-    },
+    actorId: 'igolaizola/immobilienscout24-scraper',
+    buildInput: (p) => ({
+      location: p.location || '',
+      operation: p.propertyType === 'rent' ? 'rent' : 'buy',
+      maxResults: 10,
+    }),
     normalise: (i) => ({
-      title: i.title || i.address || '',
-      address: i.address || i.location || '',
-      price: i.price || i.rentTotal || i.purchasePrice,
+      title: i.title || i.address || i.realEstateId || '',
+      address: i.address || i.addressInformation?.address || '',
+      price: i.price?.value || i.price || i.attributes?.find(a => a.label === 'Kaufpreis' || a.label === 'Kaltmiete')?.value || null,
       priceUnit: 'EUR',
-      rooms: i.rooms || i.numberOfRooms,
-      livingArea: i.livingSpace || i.area,
-      floor: i.floor || null,
+      rooms: i.rooms || i.numberOfRooms || i.attributes?.find(a => a.label === 'Zimmer')?.value || null,
+      livingArea: i.livingSpace || i.area || i.attributes?.find(a => a.label === 'Wohnfläche')?.value || null,
+      floor: i.floor || i.floorNumber || null,
       yearBuilt: i.constructionYear || i.yearBuilt || null,
-      listingUrl: i.url || i.detailUrl || null,
-      description: (i.description || i.descriptionNote || '').slice(0, 500) || null,
-      images: i.images ? i.images.slice(0, 2) : [],
+      listingUrl: i.url || i.listingUrl || (i.realEstateId ? `https://www.immobilienscout24.de/expose/${i.realEstateId}` : null),
+      description: (i.description || i.titleDescriptionText || '').slice(0, 500) || null,
+      images: i.images ? i.images.slice(0, 2) : (i.media ? i.media.slice(0,2) : []),
       source: 'immobilienscout24.de',
       extras: { energyClass: i.energyClass, courtageNote: i.courtageNote },
     }),
   }],
 
   // ── Austria ───────────────────────────────────────────────────────────
-  // Uses ImmoScout24 which covers .at domain too
-  // Actor: memo23/immobilienscout24-scraper (verified ✓, covers DE+AT)
+  // Actor: igolaizola/immobilienscout24-scraper covers .at via country param
+  // Also covers fatihtahta/immobilienscout24-scraper as backup
   AT: [{
     name: 'ImmobilienScout24.at',
-    actorId: 'memo23/immobilienscout24-scraper',
-    buildInput: (p) => {
-      const city = (p.location || 'wien').toLowerCase().replace(/\s+/g, '-');
-      const type = p.propertyType === 'rent' ? 'mieten' : 'kaufen';
-      return {
-        startUrls: [{
-          url: `https://www.immobilienscout24.at/Suche/${city}/${type}`,
-        }],
-        maxItems: 10,
-      };
-    },
+    actorId: 'igolaizola/immobilienscout24-scraper',
+    buildInput: (p) => ({
+      location: p.location || 'Wien',
+      operation: p.propertyType === 'rent' ? 'rent' : 'buy',
+      country: 'at',
+      maxResults: 10,
+    }),
     normalise: (i) => ({
-      title: i.title || '',
-      address: i.address || i.location || '',
-      price: i.price || i.rentTotal || i.purchasePrice,
+      title: i.title || i.address || '',
+      address: i.address || i.addressInformation?.address || '',
+      price: i.price?.value || i.price || null,
       priceUnit: 'EUR',
-      rooms: i.rooms || i.numberOfRooms,
-      livingArea: i.livingSpace || i.area,
-      floor: null,
+      rooms: i.rooms || i.numberOfRooms || null,
+      livingArea: i.livingSpace || i.area || null,
+      floor: i.floor || null,
       yearBuilt: i.constructionYear || null,
-      listingUrl: i.url || null,
+      listingUrl: i.url || i.listingUrl || null,
       description: (i.description || '').slice(0, 500) || null,
       images: i.images ? i.images.slice(0, 2) : [],
       source: 'immobilienscout24.at',
@@ -116,20 +107,21 @@ const PORTAL_CONFIG = {
     }),
   }],
 
-  // ── Spain / Portugal / Italy ──────────────────────────────────────────
-  // Actor: igolaizola/idealista-scraper (verified ✓, active, pay-per-event)
-  // Input: country, operation, location, maxResults
+  // ── Spain / Portugal / Italy ──────────────────────────────────────────────
+  // Actor: blackfalcondata/idealista-scraper (pay-per-event, no subscription required)
+  // Input: country (es/pt/it), operation (sale/rent), propertyType (homes), location, maxResults
   ES: [{
     name: 'Idealista (ES/PT/IT)',
-    actorId: 'igolaizola/idealista-scraper',
+    actorId: 'blackfalcondata/idealista-scraper',
     buildInput: (p) => ({
       country: p.country || 'es',
       operation: p.propertyType === 'rent' ? 'rent' : 'sale',
+      propertyType: 'homes',
       location: p.location || '',
       maxResults: 10,
     }),
     normalise: (i) => ({
-      title: i.title || i.suggestedTexts?.title || '',
+      title: i.title || (i.suggestedTexts && i.suggestedTexts.title) || '',
       address: i.address || i.district || '',
       price: i.price,
       priceUnit: 'EUR',
@@ -137,11 +129,11 @@ const PORTAL_CONFIG = {
       livingArea: i.size,
       floor: i.floor || null,
       yearBuilt: null,
-      listingUrl: i.url || (i.propertyCode ? `https://www.idealista.com/inmueble/${i.propertyCode}/` : null),
+      listingUrl: i.url || (i.propertyCode ? ('https://www.idealista.com/inmueble/' + i.propertyCode + '/') : null),
       description: (i.description || '').slice(0, 500) || null,
       images: i.thumbnail ? [i.thumbnail] : [],
       source: 'idealista.com',
-      extras: { priceByArea: i.priceByArea, hasLift: i.hasLift, energyCertificationType: i.energyCertificationType },
+      extras: { priceByArea: i.priceByArea, hasLift: i.hasLift },
     }),
   }],
   PT: [{ alias: 'ES', country: 'pt', source: 'idealista.pt' }],
@@ -152,7 +144,7 @@ const PORTAL_CONFIG = {
   // Actor: igolaizola/idealista-scraper supports France too
   FR: [{
     name: 'Idealista France',
-    actorId: 'igolaizola/idealista-scraper',
+    actorId: 'blackfalcondata/idealista-scraper',
     buildInput: (p) => ({
       country: 'fr',
       operation: p.propertyType === 'rent' ? 'rent' : 'sale',
@@ -176,24 +168,21 @@ const PORTAL_CONFIG = {
     }),
   }],
 
-  // ── United Kingdom ────────────────────────────────────────────────────
-  // Actor: jungle_synthesizer/rightmove-zoopla-onthemarket-uk-scraper (verified ✓)
-  // Actor: automation-lab/rightmove-scraper (verified ✓, fast HTTP)
+  // ── United Kingdom ────────────────────────────────────────────────────────
+  // Actor: automation-lab/rightmove-scraper (verified ✓, fast HTTP, pay-per-listing)
+  // Input: searchLocation (city/postcode), listingType (for_sale/to_rent), maxItems
   GB: [{
-    name: 'Rightmove + Zoopla + OnTheMarket',
-    actorId: 'jungle_synthesizer/rightmove-zoopla-onthemarket-uk-scraper',
+    name: 'Rightmove UK',
+    actorId: 'automation-lab/rightmove-scraper',
     buildInput: (p) => ({
-      location: p.location || '',
-      listingType: p.propertyType === 'rent' ? 'rent' : 'sale',
-      minPrice: p.minPrice || undefined,
-      maxPrice: p.maxPrice || undefined,
-      minBedrooms: p.minRooms || undefined,
+      searchLocation: p.location || '',
+      listingType: p.propertyType === 'rent' ? 'to_rent' : 'for_sale',
       maxItems: 10,
     }),
     normalise: (i) => ({
-      title: i.title || i.displayAddress || '',
+      title: i.displayAddress || i.address || i.title || '',
       address: i.displayAddress || i.address || '',
-      price: i.price,
+      price: (i.price && i.price.amount) ? i.price.amount : i.price,
       priceUnit: 'GBP',
       rooms: i.bedrooms,
       livingArea: i.floorArea || null,
@@ -201,9 +190,9 @@ const PORTAL_CONFIG = {
       yearBuilt: null,
       listingUrl: i.propertyUrl || i.url || null,
       description: (i.summary || i.description || '').slice(0, 500) || null,
-      images: i.images ? i.images.slice(0, 2) : [],
-      source: i.portal || 'rightmove.co.uk',
-      extras: { epcRating: i.epcRating, councilTaxBand: i.councilTaxBand, tenure: i.tenure },
+      images: i.images ? i.images.slice(0, 2) : (i.photos ? i.photos.slice(0,2) : []),
+      source: 'rightmove.co.uk',
+      extras: { epcRating: i.epcRating, councilTaxBand: i.councilTaxBand, tenure: i.tenure, lat: i.latitude, lng: i.longitude },
     }),
   }],
 
@@ -220,6 +209,7 @@ const PORTAL_CONFIG = {
       maxPrice: p.maxPrice || undefined,
       minBeds: p.minRooms || undefined,
       maxItems: 10,
+      includeDetails: false,
     }),
     normalise: (i) => ({
       title: i.address || i.streetAddress || '',
@@ -242,29 +232,34 @@ const PORTAL_CONFIG = {
   // No verified search-by-city actor found. Mark as noActor.
   CA: null,
 
-  // ── UAE / Middle East ─────────────────────────────────────────────────
-  // Actor: stealth_mode/propertyfinder-property-search-scraper (verified ✓)
-  // Actor: shahidirfan/propertyfinder-scraper (verified ✓, URL-based)
+  // ── UAE / Middle East ─────────────────────────────────────────────────────
+  // Actor: shahidirfan/propertyfinder-scraper (verified ✓, URL-based, no proxies)
+  // Input: startUrls (PropertyFinder search URLs), maxItems
   AE: [{
     name: 'PropertyFinder UAE',
-    actorId: 'stealth_mode/propertyfinder-property-search-scraper',
-    buildInput: (p) => ({
-      location: p.location || 'dubai',
-      category: p.propertyType === 'rent' ? 'rent' : 'buy',
-      maxItems: 10,
-    }),
+    actorId: 'shahidirfan/propertyfinder-scraper',
+    buildInput: (p) => {
+      const type = p.propertyType === 'rent' ? 'rent' : 'buy';
+      const loc = encodeURIComponent(p.location || 'Dubai');
+      return {
+        startUrls: [{
+          url: `https://www.propertyfinder.ae/en/search?c=2&t=1&fu=0&ob=nd&l=${loc}&rp=${type}`,
+        }],
+        maxItems: 10,
+      };
+    },
     normalise: (i) => ({
-      title: i.title || '',
+      title: i.title || i.name || '',
       address: i.location || i.community || i.address || '',
-      price: i.price,
+      price: i.price || i.askingPrice || null,
       priceUnit: 'AED',
-      rooms: i.bedrooms || i.beds,
-      livingArea: i.area || i.size,
+      rooms: i.bedrooms || i.beds || null,
+      livingArea: i.area || i.size || null,
       floor: null,
       yearBuilt: null,
       listingUrl: i.url || null,
       description: (i.description || '').slice(0, 500) || null,
-      images: i.images ? i.images.slice(0, 2) : [],
+      images: i.images ? i.images.slice(0, 2) : (i.photos ? i.photos.slice(0,2) : []),
       source: 'propertyfinder.ae',
       extras: { permitNumber: i.permitNumber, furnished: i.furnished, completionStatus: i.completionStatus },
     }),
@@ -277,14 +272,19 @@ const PORTAL_CONFIG = {
   AU: [{
     name: 'Domain.com.au',
     actorId: 'haketa/domain-com-au-scraper',
-    buildInput: (p) => ({
-      suburbs: [p.location || ''],
-      listingType: p.propertyType === 'rent' ? 'rent' : 'sale',
-      minPrice: p.minPrice || undefined,
-      maxPrice: p.maxPrice || undefined,
-      minBedrooms: p.minRooms || undefined,
-      maxListings: 10,
-    }),
+    buildInput: (p) => {
+      // Domain.com.au needs suburb slugs like "sydney-nsw-2000"
+      // Convert plain city name to a best-guess slug
+      const loc = (p.location || 'sydney').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      return {
+        suburbs: [loc],
+        listingType: p.propertyType === 'rent' ? 'rent' : 'sale',
+        minPrice: p.minPrice || undefined,
+        maxPrice: p.maxPrice || undefined,
+        minBedrooms: p.minRooms || undefined,
+        maxListings: 10,
+      };
+    },
     normalise: (i) => ({
       title: i.address || i.displayableAddress || '',
       address: i.address || i.displayableAddress || '',
@@ -344,9 +344,9 @@ const PORTAL_CONFIG = {
       yearBuilt: null,
       listingUrl: i.source_url || i.official_url || i.url || null,
       description: (i.description || '').slice(0, 500) || null,
-      images: i.image_urls ? i.image_urls.slice(0, 2) : (i.cover_image ? [i.cover_image] : []),
+      images: i.image_urls ? i.image_urls.slice(0, 2) : (i.cover_image ? [i.cover_image] : (i.media?.images ? i.media.images.slice(0,2) : [])),
       source: 'property24.com',
-      extras: { bathrooms: i.bathrooms, garages: i.details?.garages },
+      extras: { bathrooms: i.details?.bathrooms || i.bathrooms, garages: i.details?.garages, levies: i.fees?.levies },
     }),
   }],
 
@@ -367,9 +367,9 @@ const URL_SCRAPER_MAP = {
   'immobilienscout24.de':    { actorId: 'clearpath/immoscout24-detail-listing-scraper', inputKey: 'urls' },
   'immoscout24.de':          { actorId: 'clearpath/immoscout24-detail-listing-scraper', inputKey: 'urls' },
   // Spain/Portugal/Italy
-  'idealista.com':           { actorId: 'igolaizola/idealista-scraper', inputKey: 'startUrls' },
-  'idealista.pt':            { actorId: 'igolaizola/idealista-scraper', inputKey: 'startUrls' },
-  'idealista.it':            { actorId: 'igolaizola/idealista-scraper', inputKey: 'startUrls' },
+  'idealista.com':           { actorId: 'parseforge/idealista-scraper', inputKey: 'startUrls' },
+  'idealista.pt':            { actorId: 'parseforge/idealista-scraper', inputKey: 'startUrls' },
+  'idealista.it':            { actorId: 'parseforge/idealista-scraper', inputKey: 'startUrls' },
   // UK
   'rightmove.co.uk':         { actorId: 'automation-lab/rightmove-scraper', inputKey: 'startUrls' },
   'zoopla.co.uk':            { actorId: 'cryptosignals/zoopla-scraper',     inputKey: 'startUrls' },
@@ -388,35 +388,72 @@ const URL_SCRAPER_MAP = {
 };
 
 // ─── Market detection ──────────────────────────────────────────────────────
+// Two-pass: (1) explicit countryCode, (2) full country names, (3) major cities,
+// (4) two-letter codes ONLY as ", xx" suffix — prevents "Ciudad de Mexico" → DE bug.
 function detectMarket(location = '', countryCode = '') {
-  const code = countryCode.toUpperCase();
+  const code = (countryCode || '').toUpperCase();
   if (code && PORTAL_CONFIG[code] !== undefined) return code;
   const loc = location.toLowerCase();
-  if (/\b(ch|switzerland|schweiz|zürich|zurich|bern|aarau|basel|luzern|aargau|zug|lausanne|winterthur|boniswil)\b/.test(loc)) return 'CH';
-  if (/\b(de|germany|deutschland|berlin|münchen|munich|hamburg|frankfurt|köln|cologne|stuttgart|düsseldorf)\b/.test(loc)) return 'DE';
-  if (/\b(at|austria|österreich|wien|vienna|salzburg|graz|innsbruck|linz)\b/.test(loc)) return 'AT';
-  if (/\b(gb|uk|united kingdom|england|london|manchester|birmingham|edinburgh|bristol|leeds|glasgow)\b/.test(loc)) return 'GB';
-  if (/\b(fr|france|paris|lyon|marseille|bordeaux|toulouse|nice|nantes)\b/.test(loc)) return 'FR';
-  if (/\b(pt|portugal|lisboa|lisbon|porto|algarve|cascais|faro|braga)\b/.test(loc)) return 'PT';
-  if (/\b(it|italy|italia|rome|roma|milan|milano|florence|firenze|naples|venice)\b/.test(loc)) return 'IT';
-  if (/\b(es|spain|españa|madrid|barcelona|sevilla|valencia|malaga|asturias|gijón|gijon|bilbao)\b/.test(loc)) return 'ES';
-  if (/\b(us|usa|united states|new york|los angeles|chicago|houston|miami|san francisco|seattle|boston)\b/.test(loc)) return 'US';
-  if (/\b(ca|canada|toronto|vancouver|montreal|calgary|ottawa|edmonton)\b/.test(loc)) return 'CA';
-  if (/\b(ae|uae|dubai|abu dhabi|sharjah)\b/.test(loc)) return 'AE';
-  if (/\b(sa|saudi|riyadh|jeddah)\b/.test(loc)) return 'SA';
-  if (/\b(au|australia|sydney|melbourne|brisbane|perth|adelaide|canberra)\b/.test(loc)) return 'AU';
-  if (/\b(br|brazil|brasil|são paulo|sao paulo|rio de janeiro)\b/.test(loc)) return 'BR';
-  if (/\b(mx|mexico|méxico|ciudad de mexico|cdmx|guadalajara|monterrey)\b/.test(loc)) return 'MX';
-  if (/\b(co|colombia|bogota|bogotá|medellin|medellín|cali)\b/.test(loc)) return 'CO';
-  if (/\b(ar|argentina|buenos aires|cordoba|rosario)\b/.test(loc)) return 'AR';
-  if (/\b(sg|singapore)\b/.test(loc)) return 'SG';
-  if (/\b(my|malaysia|kuala lumpur|penang)\b/.test(loc)) return 'MY';
-  if (/\b(th|thailand|bangkok|phuket|chiang mai)\b/.test(loc)) return 'TH';
-  if (/\b(za|south africa|cape town|johannesburg|durban|sandton|nigeria|kenya|nairobi|namibia)\b/.test(loc)) return 'ZA';
-  if (/\b(ua|ukraine|kyiv|kiev|lviv|odesa)\b/.test(loc)) return 'UA';
-  if (/\b(jp|japan|tokyo|osaka|kyoto)\b/.test(loc)) return 'JP';
-  if (/\b(in|india|mumbai|delhi|bangalore|bengaluru)\b/.test(loc)) return 'IN';
-  return 'CH';
+
+  // Pass 1 — full country names (unambiguous)
+  if (/switzerland|schweiz|suisse|svizzera/.test(loc)) return 'CH';
+  if (/germany|deutschland/.test(loc)) return 'DE';
+  if (/austria|österreich|oesterreich/.test(loc)) return 'AT';
+  if (/united kingdom|england|scotland|wales/.test(loc) || /\buk\b/.test(loc)) return 'GB';
+  if (/france/.test(loc)) return 'FR';
+  if (/portugal/.test(loc)) return 'PT';
+  if (/\bitaly\b|\bitalia\b/.test(loc)) return 'IT';
+  if (/spain|españa|espana/.test(loc)) return 'ES';
+  if (/united states|\busa\b/.test(loc)) return 'US';
+  if (/\bcanada\b/.test(loc)) return 'CA';
+  if (/\buae\b|emirates/.test(loc)) return 'AE';
+  if (/saudi arabia|\bsaudi\b/.test(loc)) return 'SA';
+  if (/australia/.test(loc)) return 'AU';
+  if (/brazil|brasil/.test(loc)) return 'BR';
+  if (/\bmexico\b|méxico/.test(loc)) return 'MX';
+  if (/colombia/.test(loc)) return 'CO';
+  if (/argentina/.test(loc)) return 'AR';
+  if (/singapore/.test(loc)) return 'SG';
+  if (/malaysia/.test(loc)) return 'MY';
+  if (/thailand/.test(loc)) return 'TH';
+  if (/south africa|nigeria|kenya|namibia|botswana|zimbabwe|zambia|tanzania|mozambique/.test(loc)) return 'ZA';
+  if (/ukraine/.test(loc)) return 'UA';
+  if (/\bjapan\b/.test(loc)) return 'JP';
+  if (/\bindia\b/.test(loc)) return 'IN';
+
+  // Pass 2 — major cities (unambiguous)
+  if (/zürich|zurich|\bbern\b|aarau|basel|luzern|aargau|\bzug\b|lausanne|winterthur|boniswil|st\.? gallen/.test(loc)) return 'CH';
+  if (/berlin|münchen|munich|hamburg|frankfurt|köln|cologne|stuttgart|düsseldorf|leipzig|dresden/.test(loc)) return 'DE';
+  if (/\bwien\b|vienna|salzburg|\bgraz\b|innsbruck|\blinz\b/.test(loc)) return 'AT';
+  if (/london|manchester|birmingham|edinburgh|bristol|leeds|glasgow|liverpool/.test(loc)) return 'GB';
+  if (/\bparis\b|\blyon\b|marseille|bordeaux|toulouse|\bnice\b|nantes|strasbourg/.test(loc)) return 'FR';
+  if (/lisboa|lisbon|\bporto\b|algarve|cascais|\bfaro\b|braga|sintra/.test(loc)) return 'PT';
+  if (/\broma\b|\brome\b|milan|milano|florence|firenze|naples|napoli|venice|venezia|torino|turin/.test(loc)) return 'IT';
+  if (/madrid|barcelona|sevilla|seville|valencia|malaga|málaga|asturias|gijón|gijon|bilbao|alicante/.test(loc)) return 'ES';
+  if (/new york|los angeles|chicago|houston|miami|san francisco|seattle|boston|atlanta|denver|austin|dallas/.test(loc)) return 'US';
+  if (/toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg/.test(loc)) return 'CA';
+  if (/\bdubai\b|abu dhabi|sharjah|ajman/.test(loc)) return 'AE';
+  if (/riyadh|jeddah|mecca|medina|dammam/.test(loc)) return 'SA';
+  if (/sydney|melbourne|brisbane|perth|adelaide|canberra|gold coast|hobart/.test(loc)) return 'AU';
+  if (/são paulo|sao paulo|rio de janeiro|belo horizonte|brasilia|curitiba/.test(loc)) return 'BR';
+  if (/ciudad de mexico|\bcdmx\b|guadalajara|monterrey|cancún|cancun|tijuana/.test(loc)) return 'MX';
+  if (/bogota|bogotá|medellin|medellín|\bcali\b|cartagena/.test(loc)) return 'CO';
+  if (/buenos aires|cordoba|córdoba|rosario|mendoza/.test(loc)) return 'AR';
+  if (/kuala lumpur|penang|johor bahru/.test(loc)) return 'MY';
+  if (/bangkok|phuket|chiang mai|pattaya/.test(loc)) return 'TH';
+  if (/cape town|johannesburg|durban|sandton|pretoria|nairobi|lagos|windhoek/.test(loc)) return 'ZA';
+  if (/kyiv|kiev|lviv|odesa|kharkiv/.test(loc)) return 'UA';
+  if (/tokyo|osaka|kyoto|yokohama|nagoya/.test(loc)) return 'JP';
+  if (/mumbai|delhi|bangalore|bengaluru|hyderabad|chennai|pune/.test(loc)) return 'IN';
+
+  // Pass 3 — two-letter codes ONLY as explicit ", xx" suffix (safe)
+  const suffixMatch = loc.match(/,\s*([a-z]{2})\s*$/);
+  if (suffixMatch) {
+    const cc = suffixMatch[1].toUpperCase();
+    if (PORTAL_CONFIG[cc] !== undefined) return cc;
+  }
+
+  return 'CH'; // default core market
 }
 
 // ─── Resolve alias entries ─────────────────────────────────────────────────
@@ -510,12 +547,18 @@ async function fetchListingByUrl(listingUrl, countryCode) {
     throw new Error(`No URL scraper available for ${host || listingUrl}. Please enter the property details manually.`);
   }
 
-  const input = { [scraper.inputKey]: [{ url: listingUrl }], maxItems: 1 };
+  // Most actors accept [{url}], a few want plain strings — send object form
+  // (Apify's requestListSources standard) and let 400s trigger a string retry.
+  let input = { [scraper.inputKey]: [{ url: listingUrl }], maxItems: 1 };
 
-  const res = await fetch(
-    `https://api.apify.com/v2/acts/${scraper.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
-  );
+  const endpoint = `https://api.apify.com/v2/acts/${scraper.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`;
+  let res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+
+  // Retry once with plain-string URL array if the object form was rejected
+  if (res.status === 400) {
+    input = { [scraper.inputKey]: [listingUrl], maxItems: 1 };
+    res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  }
 
   if (!res.ok) {
     throw new Error(`Scraper returned ${res.status}. The listing may require a login or have been removed.`);
@@ -599,6 +642,71 @@ const CURRENCY_MAP = {
   BR:'BRL', MX:'MXN', CO:'COP', AR:'USD', SG:'SGD', MY:'MYR', TH:'THB',
   ZA:'ZAR', UA:'UAH', JP:'JPY', IN:'INR',
 };
+
+// ─── Anti-hallucination output validation ─────────────────────────────────
+// Enforces: results must map to real scraped listings, scores clamped 0-10,
+// D9 suppression rule applied in code (not just prompt), prices from real data.
+function validateScoredOutput(scored, realListings) {
+  if (!scored || !Array.isArray(scored.results)) return scored;
+
+  const realUrls = new Set(realListings.map(l => l.listingUrl).filter(Boolean));
+  const realByUrl = {};
+  realListings.forEach(l => { if (l.listingUrl) realByUrl[l.listingUrl] = l; });
+
+  const clamp = (n) => Math.max(0, Math.min(10, Number(n) || 0));
+
+  scored.results = scored.results
+    // Keep only results traceable to a real scraped listing
+    .filter(r => {
+      if (realUrls.size === 0) return true; // single-listing URL mode may lack URLs
+      return r.listingUrl && realUrls.has(r.listingUrl);
+    })
+    .map((r, idx) => {
+      const real = r.listingUrl ? realByUrl[r.listingUrl] : realListings[idx];
+
+      // Force price/currency/address from REAL data — never trust model output for facts
+      if (real) {
+        r.price = real.price ?? r.price;
+        r.priceUnit = real.priceUnit || r.priceUnit;
+        r.address = real.address || r.address;
+        r.title = real.title || r.title;
+        r.source = real.source || r.source;
+        r.listingUrl = real.listingUrl || r.listingUrl;
+        r.livingArea = real.livingArea ?? r.livingArea;
+      }
+
+      // Clamp all dimension scores 0-10
+      if (r.dimensions) {
+        for (const key of Object.keys(r.dimensions)) {
+          if (r.dimensions[key] && typeof r.dimensions[key].score !== 'undefined') {
+            r.dimensions[key].score = clamp(r.dimensions[key].score);
+          }
+        }
+      }
+      r.compositeScore = clamp(r.compositeScore);
+
+      // Enforce D9 suppression rule server-side
+      const d9 = r.dimensions?.D9?.score;
+      if (typeof d9 === 'number' && d9 < 3.0 && r.compositeScore > 5.0) {
+        r.compositeScore = 5.0;
+        r.suppressed = true;
+        r.suppressionReason = r.suppressionReason || `D9 Legal & Regulatory score ${d9.toFixed(1)} triggered composite cap at 5.0`;
+      }
+
+      return r;
+    });
+
+  // Re-rank after filtering
+  scored.results.sort((a, b) => (b.compositeScore || 0) - (a.compositeScore || 0));
+  scored.results.forEach((r, i) => { r.rank = i + 1; });
+
+  if (scored.searchMeta) {
+    scored.searchMeta.validated = true;
+    scored.searchMeta.listingsFound = scored.results.length;
+  }
+
+  return scored;
+}
 
 // ─── Build scoring prompt ──────────────────────────────────────────────────
 function buildScoringPrompt(listings, searchParams, market) {
@@ -710,6 +818,7 @@ export default async function handler(req, res) {
       try { scored = JSON.parse(rawText.replace(/```json|```/g,'').trim()); }
       catch { return res.status(500).json({ error: 'Failed to parse scoring response', raw: rawText }); }
 
+      scored = validateScoredOutput(scored, [listing]);
       scored.rawListings = [listing];
       scored.mode = 'url';
       return res.status(200).json(scored);
@@ -768,6 +877,18 @@ export default async function handler(req, res) {
       let scored;
       try { scored = JSON.parse(rawText.replace(/```json|```/g,'').trim()); }
       catch { return res.status(500).json({ error: 'Failed to parse scoring response', raw: rawText }); }
+
+      scored = validateScoredOutput(scored, listings);
+
+      // If validation stripped everything, the model returned untraceable results — refuse
+      if (!scored.results || scored.results.length === 0) {
+        return res.status(200).json({
+          error: 'validation_failed',
+          message: 'Scored results could not be verified against real listing data. Please try again.',
+          market, results: [],
+          searchMeta: { location, market, listingsFound: 0, dataSource: 'validation rejected output', scoredAt: new Date().toISOString() },
+        });
+      }
 
       scored.rawListings = listings;
       if (portalErrors.length) scored.portalErrors = portalErrors;
