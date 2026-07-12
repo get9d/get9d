@@ -14,6 +14,10 @@ const ALLOWED_MODELS = [
 const MAX_TOKENS_CAP = 8192;   // proxy mode (frontend single-property scoring — no Apify in the same request)
 const SCORE_TOKENS   = 3600;   // discovery mode — must fit alongside Apify inside 60s Vercel limit
 const URL_SCORE_TOKENS = 2800; // url mode — single listing after Apify detail scrape
+
+// Apify API requires tilde-separated "username~actorname" in the URL path.
+// A slash ("username/actorname") breaks the route and returns 404 Not Found.
+const actorPath = (id) => id.replace('/', '~');
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 
 // ─── VERIFIED PORTAL REGISTRY ─────────────────────────────────────────────
@@ -529,7 +533,7 @@ async function fetchAuctionListings(searchParams) {
     : normAuc.location;
   const input = auctionSource.buildInput({ ...searchParams, location: aucLocation });
   const res = await fetch(
-    `https://api.apify.com/v2/acts/${auctionSource.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`,
+    `https://api.apify.com/v2/acts/${actorPath(auctionSource.actorId)}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
   );
 
@@ -761,7 +765,7 @@ async function fetchListings(searchParams) {
       const abortTimer = setTimeout(() => ctrl.abort(), 28000);
       try {
         const res = await fetch(
-          `https://api.apify.com/v2/acts/${portal.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`,
+          `https://api.apify.com/v2/acts/${actorPath(portal.actorId)}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: ctrl.signal }
         );
         if (!res.ok) throw new Error(`${portal.name} → ${res.status} ${res.statusText}`);
@@ -826,7 +830,7 @@ async function fetchListingByUrl(listingUrl, countryCode) {
   // (Apify's requestListSources standard) and let 400s trigger a string retry.
   let input = { [scraper.inputKey]: [{ url: listingUrl }], maxItems: 1 };
 
-  const endpoint = `https://api.apify.com/v2/acts/${scraper.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`;
+  const endpoint = `https://api.apify.com/v2/acts/${actorPath(scraper.actorId)}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`;
   let res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 
   // Retry once with plain-string URL array if the object form was rejected
