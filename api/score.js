@@ -520,7 +520,13 @@ async function fetchAuctionListings(searchParams) {
   );
 
   if (!res.ok) {
-    throw new Error(`${auctionSource.name} returned ${res.status} ${res.statusText}`);
+    const errBody = await res.text().catch(() => '');
+    let detail = '';
+    try {
+      const ej = JSON.parse(errBody);
+      detail = ej.error ? `${ej.error.type || ''}: ${ej.error.message || ''}` : errBody.slice(0, 200);
+    } catch { detail = errBody.slice(0, 200); }
+    throw new Error(`${auctionSource.name} returned ${res.status} ${res.statusText}${detail ? ' — ' + detail : ''}`);
   }
 
   const items = await res.json();
@@ -750,7 +756,17 @@ async function fetchListings(searchParams) {
           `https://api.apify.com/v2/acts/${actorPath(portal.actorId)}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: ctrl.signal }
         );
-        if (!res.ok) throw new Error(`${portal.name} → ${res.status} ${res.statusText}`);
+        if (!res.ok) {
+          // Apify puts the real reason (invalid-input field, paid-actor
+          // restriction, run failure) in the JSON body — surface it.
+          const errBody = await res.text().catch(() => '');
+          let detail = '';
+          try {
+            const ej = JSON.parse(errBody);
+            detail = ej.error ? `${ej.error.type || ''}: ${ej.error.message || ''}` : errBody.slice(0, 200);
+          } catch { detail = errBody.slice(0, 200); }
+          throw new Error(`${portal.name} → ${res.status} ${res.statusText}${detail ? ' — ' + detail : ''}`);
+        }
         const items = await res.json();
         return { portal: portal.name, items: Array.isArray(items) ? items : [] };
       } finally {
@@ -822,7 +838,13 @@ async function fetchListingByUrl(listingUrl, countryCode) {
   }
 
   if (!res.ok) {
-    throw new Error(`Scraper returned ${res.status}. The listing may require a login or have been removed.`);
+    const errBody = await res.text().catch(() => '');
+    let detail = '';
+    try {
+      const ej = JSON.parse(errBody);
+      detail = ej.error ? `${ej.error.type || ''}: ${ej.error.message || ''}` : errBody.slice(0, 200);
+    } catch { detail = errBody.slice(0, 200); }
+    throw new Error(`Scraper returned ${res.status}${detail ? ' — ' + detail : ''}. The listing may require a login or have been removed.`);
   }
 
   const items = await res.json();
