@@ -1,854 +1,1093 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// get9d Scoring Engine  v5.0  —  api/score.js
-//
-// ARCHITECTURE: Hard-fail. Every output traces to verified scraped data.
-//   No synthetic data. No hallucination. Fail clearly when data unavailable.
-//
-// CHANGELOG v5.0 vs v4.2
-//   • Correct 9D dimensions per product spec (D7 = Price Trend, not Appreciation)
-//   • D9 suppression threshold raised 3.0 → 4.0 (more conservative)
-//   • Per-dimension input data exposed in response (not scores only)
-//   • Confidence: HIGH / MEDIUM / LOW based on volume + data recency
-//   • LIMITED_DATA state when < 5 comparables (D1 never faked)
-//   • D2 decomposed into 5 sub-risks: flood, wildfire, heat, seismic, coastal
-//   • D5 rent-control zone flag per market/city
-//   • D4 country- and region-specific transaction cost tables
-//   • D8 signals array (observable listing evidence, not composite only)
-//   • D9 mandatory disclaimer on ALL outputs regardless of score
-//   • Tier gating: free = D1+D8 preview | core = D1–D6 | pro = D1–D9 + AI
-//   • Auction channels: ZVG.de (DE), BOE.es (ES)
-// ─────────────────────────────────────────────────────────────────────────────
+// get9d.com — 9D Property Scoring Engine v4.2 (Global — Verified + Validated + Auctions)
+// dealType "auction": DE ZVG-Portal foreclosures + ES BOE.es judicial auctions
+// All Apify actor IDs verified against live Apify Store pages July 2026.
+// Server-side output validation: results must trace to real scraped listings.
+// NO Claude/Perplexity fallback — hard fail prevents hallucination.
+// Perplexity Sonar slot reserved (stubbed) for future activation.
 
-'use strict';
+export const config = { maxDuration: 60 };
 
-const { ApifyClient } = require('apify-client');
+const ALLOWED_MODELS = [
+  'claude-opus-4-8','claude-sonnet-4-6','claude-haiku-4-5-20251001',
+  'claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-3-opus-20240229',
+];
+const MAX_TOKENS_CAP = 4096;
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 
-const apify = new ApifyClient({ token: process.env.APIFY_TOKEN });
+// ─── VERIFIED PORTAL REGISTRY ─────────────────────────────────────────────
+// All actorIds verified on apify.com/store July 2026.
+// buildInput field names verified from each actor's documentation.
+const PORTAL_CONFIG = {
 
-// ── Actor IDs  (set in Vercel environment variables) ─────────────────────────
-const ACTORS = {
-  ch:         process.env.ACTOR_CH   || 'lhotakj/homegate-scraper',
-  de:         process.env.ACTOR_DE   || 'misceres/immoscout24-scraper',
-  at:         process.env.ACTOR_AT   || 'apify/willhaben-scraper',
-  es:         process.env.ACTOR_ES   || 'epctex/idealista-scraper',
-  pt:         process.env.ACTOR_PT   || 'epctex/idealista-scraper',
-  it:         process.env.ACTOR_IT   || 'studio-amba/immobiliare-scraper',
-  fr:         process.env.ACTOR_FR   || 'apify/seloger-scraper',
-  de_auction: process.env.ACTOR_ZVG  || 'apify/zvg-portal-scraper',
-  es_auction: process.env.ACTOR_BOE  || 'apify/boe-scraper',
+  // ── Switzerland ───────────────────────────────────────────────────────
+  // Actor: santamaria-automations/homegate-scraper (verified ✓, $3/1K)
+  // Input: listingType, city, minPrice, maxPrice, minRooms, maxRooms, maxItems
+  CH: [{
+    name: 'Homegate.ch',
+    actorId: 'santamaria-automations/homegate-scraper',
+    buildInput: (p) => ({
+      listingType: p.propertyType === 'rent' ? 'rent' : 'buy',
+      city: p.location || '',
+      minPrice: p.minPrice || undefined,
+      maxPrice: p.maxPrice || undefined,
+      minRooms: p.minRooms || undefined,
+      maxRooms: p.maxRooms || undefined,
+      maxItems: 10,
+    }),
+    normalise: (i) => ({
+      title: i.title || i.name || [i.rooms, 'Zimmer', i.propertyType].filter(Boolean).join(' ') || '',
+      address: [i.street, i.zip, i.city, i.canton].filter(Boolean).join(', '),
+      price: i.price || i.pricePerMonth || i.purchasePrice || null,
+      priceUnit: 'CHF',
+      rooms: i.rooms || i.numberOfRooms || null,
+      livingArea: i.area || i.livingSpace || null,
+      floor: i.floor || null,
+      yearBuilt: i.yearBuilt || i.constructionYear || null,
+      listingUrl: i.source_url || i.url || i.listingUrl || null,
+      description: (i.description || i.shortDescription || '').slice(0, 500) || null,
+      images: i.image_url ? [i.image_url] : (i.imageUrls ? i.imageUrls.slice(0,2) : []),
+      source: 'homegate.ch',
+      extras: { features: i.features, lat: i.latitude, lng: i.longitude, propertyType: i.propertyType },
+    }),
+  }],
+
+  // ── Germany ───────────────────────────────────────────────────────────
+  // Actor: igolaizola/immobilienscout24-scraper (verified ✓, active)
+  // Input: location (city string), operation (buy/rent), maxResults
+  DE: [{
+    name: 'ImmobilienScout24.de',
+    actorId: 'igolaizola/immobilienscout24-scraper',
+    buildInput: (p) => ({
+      location: p.location || '',
+      operation: p.propertyType === 'rent' ? 'rent' : 'buy',
+      maxResults: 10,
+    }),
+    normalise: (i) => ({
+      title: i.title || i.address || i.realEstateId || '',
+      address: i.address || i.addressInformation?.address || '',
+      price: i.price?.value || i.price || i.attributes?.find(a => a.label === 'Kaufpreis' || a.label === 'Kaltmiete')?.value || null,
+      priceUnit: 'EUR',
+      rooms: i.rooms || i.numberOfRooms || i.attributes?.find(a => a.label === 'Zimmer')?.value || null,
+      livingArea: i.livingSpace || i.area || i.attributes?.find(a => a.label === 'Wohnfläche')?.value || null,
+      floor: i.floor || i.floorNumber || null,
+      yearBuilt: i.constructionYear || i.yearBuilt || null,
+      listingUrl: i.url || i.listingUrl || (i.realEstateId ? `https://www.immobilienscout24.de/expose/${i.realEstateId}` : null),
+      description: (i.description || i.titleDescriptionText || '').slice(0, 500) || null,
+      images: i.images ? i.images.slice(0, 2) : (i.media ? i.media.slice(0,2) : []),
+      source: 'immobilienscout24.de',
+      extras: { energyClass: i.energyClass, courtageNote: i.courtageNote },
+    }),
+  }],
+
+  // ── Austria ───────────────────────────────────────────────────────────
+  // Actor: igolaizola/immobilienscout24-scraper covers .at via country param
+  // Also covers fatihtahta/immobilienscout24-scraper as backup
+  AT: [{
+    name: 'ImmobilienScout24.at',
+    actorId: 'igolaizola/immobilienscout24-scraper',
+    buildInput: (p) => ({
+      location: p.location || 'Wien',
+      operation: p.propertyType === 'rent' ? 'rent' : 'buy',
+      country: 'at',
+      maxResults: 10,
+    }),
+    normalise: (i) => ({
+      title: i.title || i.address || '',
+      address: i.address || i.addressInformation?.address || '',
+      price: i.price?.value || i.price || null,
+      priceUnit: 'EUR',
+      rooms: i.rooms || i.numberOfRooms || null,
+      livingArea: i.livingSpace || i.area || null,
+      floor: i.floor || null,
+      yearBuilt: i.constructionYear || null,
+      listingUrl: i.url || i.listingUrl || null,
+      description: (i.description || '').slice(0, 500) || null,
+      images: i.images ? i.images.slice(0, 2) : [],
+      source: 'immobilienscout24.at',
+      extras: {},
+    }),
+  }],
+
+  // ── Spain / Portugal / Italy ──────────────────────────────────────────────
+  // Actor: blackfalcondata/idealista-scraper (pay-per-event, no subscription required)
+  // Input: country (es/pt/it), operation (sale/rent), propertyType (homes), location, maxResults
+  ES: [{
+    name: 'Idealista (ES/PT/IT)',
+    actorId: 'blackfalcondata/idealista-scraper',
+    buildInput: (p) => ({
+      country: p.country || 'es',
+      operation: p.propertyType === 'rent' ? 'rent' : 'sale',
+      propertyType: 'homes',
+      location: p.location || '',
+      maxResults: 10,
+    }),
+    normalise: (i) => ({
+      title: i.title || (i.suggestedTexts && i.suggestedTexts.title) || '',
+      address: i.address || i.district || '',
+      price: i.price,
+      priceUnit: 'EUR',
+      rooms: i.rooms,
+      livingArea: i.size,
+      floor: i.floor || null,
+      yearBuilt: null,
+      listingUrl: i.url || (i.propertyCode ? ('https://www.idealista.com/inmueble/' + i.propertyCode + '/') : null),
+      description: (i.description || '').slice(0, 500) || null,
+      images: i.thumbnail ? [i.thumbnail] : [],
+      source: 'idealista.com',
+      extras: { priceByArea: i.priceByArea, hasLift: i.hasLift },
+    }),
+  }],
+  PT: [{ alias: 'ES', country: 'pt', source: 'idealista.pt' }],
+  IT: [{ alias: 'ES', country: 'it', source: 'idealista.it' }],
+
+  // ── France ────────────────────────────────────────────────────────────
+  // No single verified actor found for SeLoger — using Idealista France
+  // Actor: igolaizola/idealista-scraper supports France too
+  FR: [{
+    name: 'Idealista France',
+    actorId: 'blackfalcondata/idealista-scraper',
+    buildInput: (p) => ({
+      country: 'fr',
+      operation: p.propertyType === 'rent' ? 'rent' : 'sale',
+      location: p.location || '',
+      maxResults: 10,
+    }),
+    normalise: (i) => ({
+      title: i.title || '',
+      address: i.address || i.district || '',
+      price: i.price,
+      priceUnit: 'EUR',
+      rooms: i.rooms,
+      livingArea: i.size,
+      floor: i.floor || null,
+      yearBuilt: null,
+      listingUrl: i.url || null,
+      description: (i.description || '').slice(0, 500) || null,
+      images: i.thumbnail ? [i.thumbnail] : [],
+      source: 'idealista.fr',
+      extras: {},
+    }),
+  }],
+
+  // ── United Kingdom ────────────────────────────────────────────────────────
+  // Actor: automation-lab/rightmove-scraper (verified ✓, fast HTTP, pay-per-listing)
+  // Input: searchLocation (city/postcode), listingType (for_sale/to_rent), maxItems
+  GB: [{
+    name: 'Rightmove UK',
+    actorId: 'automation-lab/rightmove-scraper',
+    buildInput: (p) => ({
+      searchLocation: p.location || '',
+      listingType: p.propertyType === 'rent' ? 'to_rent' : 'for_sale',
+      maxItems: 10,
+    }),
+    normalise: (i) => ({
+      title: i.displayAddress || i.address || i.title || '',
+      address: i.displayAddress || i.address || '',
+      price: (i.price && i.price.amount) ? i.price.amount : i.price,
+      priceUnit: 'GBP',
+      rooms: i.bedrooms,
+      livingArea: i.floorArea || null,
+      floor: null,
+      yearBuilt: null,
+      listingUrl: i.propertyUrl || i.url || null,
+      description: (i.summary || i.description || '').slice(0, 500) || null,
+      images: i.images ? i.images.slice(0, 2) : (i.photos ? i.photos.slice(0,2) : []),
+      source: 'rightmove.co.uk',
+      extras: { epcRating: i.epcRating, councilTaxBand: i.councilTaxBand, tenure: i.tenure, lat: i.latitude, lng: i.longitude },
+    }),
+  }],
+
+  // ── USA ───────────────────────────────────────────────────────────────
+  // Actor: maxcopell/zillow-scraper (verified ✓, $2/1K)
+  // Input: location, listingType, minPrice, maxPrice, minBeds, maxItems
+  US: [{
+    name: 'Zillow',
+    actorId: 'maxcopell/zillow-scraper',
+    buildInput: (p) => ({
+      location: p.location || '',
+      listingType: p.propertyType === 'rent' ? 'for_rent' : 'for_sale',
+      minPrice: p.minPrice || undefined,
+      maxPrice: p.maxPrice || undefined,
+      minBeds: p.minRooms || undefined,
+      maxItems: 10,
+      includeDetails: false,
+    }),
+    normalise: (i) => ({
+      title: i.address || i.streetAddress || '',
+      address: i.address || i.streetAddress || '',
+      price: i.price || i.listPrice,
+      priceUnit: 'USD',
+      rooms: i.bedrooms || i.beds,
+      livingArea: i.livingArea || i.sqft,
+      floor: null,
+      yearBuilt: i.yearBuilt,
+      listingUrl: i.url || i.detailUrl || null,
+      description: (i.description || '').slice(0, 500) || null,
+      images: i.photos ? i.photos.slice(0, 2) : (i.images ? i.images.slice(0, 2) : []),
+      source: 'zillow.com',
+      extras: { zestimate: i.zestimate, daysOnMarket: i.daysOnMarket, pricePerSqft: i.pricePerSqft },
+    }),
+  }],
+
+  // ── Canada ────────────────────────────────────────────────────────────
+  // No verified search-by-city actor found. Mark as noActor.
+  CA: null,
+
+  // ── UAE / Middle East ─────────────────────────────────────────────────────
+  // Actor: shahidirfan/propertyfinder-scraper (verified ✓, URL-based, no proxies)
+  // Input: startUrls (PropertyFinder search URLs), maxItems
+  AE: [{
+    name: 'PropertyFinder UAE',
+    actorId: 'shahidirfan/propertyfinder-scraper',
+    buildInput: (p) => {
+      const type = p.propertyType === 'rent' ? 'rent' : 'buy';
+      const loc = encodeURIComponent(p.location || 'Dubai');
+      return {
+        startUrls: [{
+          url: `https://www.propertyfinder.ae/en/search?c=2&t=1&fu=0&ob=nd&l=${loc}&rp=${type}`,
+        }],
+        maxItems: 10,
+      };
+    },
+    normalise: (i) => ({
+      title: i.title || i.name || '',
+      address: i.location || i.community || i.address || '',
+      price: i.price || i.askingPrice || null,
+      priceUnit: 'AED',
+      rooms: i.bedrooms || i.beds || null,
+      livingArea: i.area || i.size || null,
+      floor: null,
+      yearBuilt: null,
+      listingUrl: i.url || null,
+      description: (i.description || '').slice(0, 500) || null,
+      images: i.images ? i.images.slice(0, 2) : (i.photos ? i.photos.slice(0,2) : []),
+      source: 'propertyfinder.ae',
+      extras: { permitNumber: i.permitNumber, furnished: i.furnished, completionStatus: i.completionStatus },
+    }),
+  }],
+  SA: [{ alias: 'AE', country: 'sa', source: 'propertyfinder.ae/saudi' }],
+
+  // ── Australia ─────────────────────────────────────────────────────────
+  // Actor: haketa/domain-com-au-scraper (verified ✓)
+  // Input: suburbs (array of suburb slugs), listingType, maxListings
+  AU: [{
+    name: 'Domain.com.au',
+    actorId: 'haketa/domain-com-au-scraper',
+    buildInput: (p) => {
+      // Domain.com.au needs suburb slugs like "sydney-nsw-2000"
+      // Convert plain city name to a best-guess slug
+      const loc = (p.location || 'sydney').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      return {
+        suburbs: [loc],
+        listingType: p.propertyType === 'rent' ? 'rent' : 'sale',
+        minPrice: p.minPrice || undefined,
+        maxPrice: p.maxPrice || undefined,
+        minBedrooms: p.minRooms || undefined,
+        maxListings: 10,
+      };
+    },
+    normalise: (i) => ({
+      title: i.address || i.displayableAddress || '',
+      address: i.address || i.displayableAddress || '',
+      price: i.price,
+      priceUnit: 'AUD',
+      rooms: i.bedrooms,
+      livingArea: i.area || i.buildingArea || null,
+      floor: null,
+      yearBuilt: null,
+      listingUrl: i.url || i.listingUrl || null,
+      description: (i.description || '').slice(0, 500) || null,
+      images: i.images ? i.images.slice(0, 2) : [],
+      source: 'domain.com.au',
+      extras: { auctionDate: i.auctionDetails?.dateTime, daysOnMarket: i.daysOnMarket },
+    }),
+  }],
+
+  // ── Brazil ────────────────────────────────────────────────────────────
+  // No verified search actor found. Mark as noActor.
+  BR: null,
+
+  // ── Mexico ────────────────────────────────────────────────────────────
+  // No verified actor with simple city search. Mark as noActor.
+  MX: null,
+
+  // ── Colombia ──────────────────────────────────────────────────────────
+  CO: null,
+
+  // ── Argentina ─────────────────────────────────────────────────────────
+  AR: null,
+
+  // ── Southeast Asia ────────────────────────────────────────────────────
+  SG: null,
+  MY: null,
+  TH: null,
+
+  // ── South Africa + Africa ─────────────────────────────────────────────
+  // Actor: agentx/property24-property-scraper (verified ✓, clean JSON API)
+  // Input: country, location, max_results, listing_type
+  ZA: [{
+    name: 'Property24',
+    actorId: 'agentx/property24-property-scraper',
+    buildInput: (p) => ({
+      country: p.country || 'South Africa',
+      location: p.location || '',
+      max_results: 10,
+      listing_type: p.propertyType === 'rent' ? 'To Rent' : 'For Sale',
+    }),
+    normalise: (i) => ({
+      title: i.title || '',
+      address: i.address || i.location?.address || '',
+      price: i.price,
+      priceUnit: 'ZAR',
+      rooms: i.rooms || i.bedrooms,
+      livingArea: i.area || i.floorSize,
+      floor: null,
+      yearBuilt: null,
+      listingUrl: i.source_url || i.official_url || i.url || null,
+      description: (i.description || '').slice(0, 500) || null,
+      images: i.image_urls ? i.image_urls.slice(0, 2) : (i.cover_image ? [i.cover_image] : (i.media?.images ? i.media.images.slice(0,2) : [])),
+      source: 'property24.com',
+      extras: { bathrooms: i.details?.bathrooms || i.bathrooms, garages: i.details?.garages, levies: i.fees?.levies },
+    }),
+  }],
+
+  // ── Perplexity-only markets ───────────────────────────────────────────
+  UA: null,
+  JP: null,
+  IN: null,
+  CN: null,
 };
 
-// ── Transaction costs by market (D4) ─────────────────────────────────────────
-// Source: official government tables, hardcoded — update annually
-const TX_COSTS = {
-  ch: { transfer: 0.000, notary: 0.015, registry: 0.010, agent: 0.030, total: 0.055 },
-  de_default: { transfer: 0.050, notary: 0.015, registry: 0.005, agent: 0.036, total: 0.106 },
-  de_BY: { transfer: 0.035, notary: 0.015, registry: 0.005, agent: 0.036, total: 0.091 },
-  de_BB: { transfer: 0.065, notary: 0.015, registry: 0.005, agent: 0.036, total: 0.121 },
-  de_SH: { transfer: 0.065, notary: 0.015, registry: 0.005, agent: 0.036, total: 0.121 },
-  de_TH: { transfer: 0.065, notary: 0.015, registry: 0.005, agent: 0.036, total: 0.121 },
-  de_NW: { transfer: 0.065, notary: 0.015, registry: 0.005, agent: 0.036, total: 0.121 },
-  at: { transfer: 0.035, notary: 0.025, registry: 0.011, agent: 0.036, total: 0.107 },
-  es_default: { transfer: 0.080, notary: 0.010, registry: 0.006, agent: 0.030, total: 0.126 },
-  es_CAT: { transfer: 0.100, notary: 0.010, registry: 0.006, agent: 0.030, total: 0.146 },
-  es_AND: { transfer: 0.070, notary: 0.010, registry: 0.006, agent: 0.030, total: 0.116 },
-  pt: { transfer: 0.040, notary: 0.010, registry: 0.008, agent: 0.030, total: 0.088 },
-  it: { transfer: 0.090, notary: 0.015, registry: 0.000, agent: 0.030, total: 0.135 },
-  fr: { transfer: 0.075, notary: 0.000, registry: 0.000, agent: 0.045, total: 0.120 },
+// ─── URL-based single listing scrapers ────────────────────────────────────
+// Verified actor IDs for detail scraping from a specific listing URL.
+const URL_SCRAPER_MAP = {
+  // Switzerland
+  'homegate.ch':             { actorId: 'ecomscrape/homegate-property-details-scraper', inputKey: 'startUrls' },
+  'immoscout24.ch':          { actorId: 'ecomscrape/homegate-property-details-scraper', inputKey: 'startUrls' },
+  // Germany
+  'immobilienscout24.de':    { actorId: 'clearpath/immoscout24-detail-listing-scraper', inputKey: 'urls' },
+  'immoscout24.de':          { actorId: 'clearpath/immoscout24-detail-listing-scraper', inputKey: 'urls' },
+  // Spain/Portugal/Italy
+  'idealista.com':           { actorId: 'parseforge/idealista-scraper', inputKey: 'startUrls' },
+  'idealista.pt':            { actorId: 'parseforge/idealista-scraper', inputKey: 'startUrls' },
+  'idealista.it':            { actorId: 'parseforge/idealista-scraper', inputKey: 'startUrls' },
+  // UK
+  'rightmove.co.uk':         { actorId: 'automation-lab/rightmove-scraper', inputKey: 'startUrls' },
+  'zoopla.co.uk':            { actorId: 'cryptosignals/zoopla-scraper',     inputKey: 'startUrls' },
+  'onthemarket.com':         { actorId: 'jungle_synthesizer/rightmove-zoopla-onthemarket-uk-scraper', inputKey: 'startUrls' },
+  // USA
+  'zillow.com':              { actorId: 'maxcopell/zillow-detail-scraper',   inputKey: 'urls' },
+  'realtor.com':             { actorId: 'maxcopell/zillow-scraper',          inputKey: 'startUrls' },
+  // UAE
+  'propertyfinder.ae':       { actorId: 'shahidirfan/propertyfinder-scraper', inputKey: 'startUrls' },
+  'bayut.com':               { actorId: 'shahidirfan/propertyfinder-scraper', inputKey: 'startUrls' },
+  // Australia
+  'domain.com.au':           { actorId: 'haketa/domain-com-au-scraper',     inputKey: 'startUrls' },
+  'realestate.com.au':       { actorId: 'haketa/domain-com-au-scraper',     inputKey: 'startUrls' },
+  // South Africa
+  'property24.com':          { actorId: 'agentx/property24-property-scraper', inputKey: 'startUrls' },
 };
 
-// ── Climate risk baseline by market (D2) ─────────────────────────────────────
-// Sub-risks scored 1 (low) – 10 (high). Lower is BETTER for D2 final score.
-const CLIMATE_RISK = {
-  ch: { flood: 3, wildfire: 2, heat: 3, seismic: 3, coastal: 1 },
-  de: { flood: 4, wildfire: 3, heat: 4, seismic: 2, coastal: 2 },
-  at: { flood: 4, wildfire: 3, heat: 4, seismic: 3, coastal: 1 },
-  es: { flood: 5, wildfire: 7, heat: 8, seismic: 4, coastal: 5 },
-  pt: { flood: 5, wildfire: 8, heat: 7, seismic: 5, coastal: 6 },
-  it: { flood: 5, wildfire: 6, heat: 7, seismic: 7, coastal: 5 },
-  fr: { flood: 4, wildfire: 5, heat: 5, seismic: 2, coastal: 3 },
+
+// ─── AUCTION / DISTRESSED REGISTRY ────────────────────────────────────────
+// Court foreclosure auctions — separate channel from regular listings.
+// DE: ZVG-Portal (Zwangsversteigerungen) | ES: BOE.es (subastas judiciales)
+// AT: Ediktsdatei insolvency/court publications (name or Bundesland search)
+const AUCTION_CONFIG = {
+  DE: {
+    name: 'ZVG-Portal (Zwangsversteigerungen)',
+    actorId: 'signalflow/zvg-portal-scraper',
+    // Input: bundesland filter (e.g. "Bayern", "Berlin"). Maps city → Bundesland where possible.
+    buildInput: (p) => {
+      const BUNDESLAND_MAP = {
+        'berlin':'Berlin','münchen':'Bayern','munich':'Bayern','hamburg':'Hamburg',
+        'frankfurt':'Hessen','köln':'Nordrhein-Westfalen','cologne':'Nordrhein-Westfalen',
+        'stuttgart':'Baden-Württemberg','düsseldorf':'Nordrhein-Westfalen',
+        'leipzig':'Sachsen','dresden':'Sachsen','hannover':'Niedersachsen',
+        'bremen':'Bremen','nürnberg':'Bayern','dortmund':'Nordrhein-Westfalen',
+        'essen':'Nordrhein-Westfalen','bonn':'Nordrhein-Westfalen',
+        'bayern':'Bayern','hessen':'Hessen','sachsen':'Sachsen',
+        'baden-württemberg':'Baden-Württemberg','nordrhein-westfalen':'Nordrhein-Westfalen',
+        'niedersachsen':'Niedersachsen','brandenburg':'Brandenburg',
+        'thüringen':'Thüringen','rheinland-pfalz':'Rheinland-Pfalz',
+        'schleswig-holstein':'Schleswig-Holstein','saarland':'Saarland',
+        'mecklenburg-vorpommern':'Mecklenburg-Vorpommern','sachsen-anhalt':'Sachsen-Anhalt',
+      };
+      const locLower = (p.location || '').toLowerCase();
+      let bundesland = null;
+      for (const [key, bl] of Object.entries(BUNDESLAND_MAP)) {
+        if (locLower.includes(key)) { bundesland = bl; break; }
+      }
+      return {
+        ...(bundesland && { bundesland }),
+        maxItems: 15,
+      };
+    },
+    normalise: (i) => {
+      const verkehrswert = i.verkehrswert || i.marketValue || i.market_value || null;
+      const minBid = i.minBid || i.mindestgebot || i.min_bid_50 || (verkehrswert ? Math.round(verkehrswert * 0.5) : null);
+      const safetyMargin = i.safetyMargin || i.sicherheitsgrenze || i.safety_70 || (verkehrswert ? Math.round(verkehrswert * 0.7) : null);
+      return {
+        title: `[AUKTION] ${i.title || i.objektArt || i.object_type || 'Zwangsversteigerung'}`,
+        address: i.address || i.adresse || i.lage || '',
+        price: verkehrswert,
+        priceUnit: 'EUR',
+        rooms: i.rooms || null,
+        livingArea: i.area || i.wohnflaeche || null,
+        floor: null,
+        yearBuilt: i.yearBuilt || i.baujahr || null,
+        listingUrl: i.url || i.detailUrl || 'https://www.zvg-portal.de',
+        description: [
+          `GERICHTLICHE ZWANGSVERSTEIGERUNG.`,
+          verkehrswert ? `Verkehrswert (court-assessed market value): EUR ${verkehrswert.toLocaleString?.() || verkehrswert}.` : '',
+          minBid ? `Legal minimum bid (50% rule): EUR ${minBid.toLocaleString?.() || minBid}.` : '',
+          safetyMargin ? `Creditor objection threshold (70% rule): EUR ${safetyMargin.toLocaleString?.() || safetyMargin}.` : '',
+          i.terminDatum || i.auctionDate ? `Auction date: ${i.terminDatum || i.auctionDate}.` : '',
+          i.amtsgericht || i.court ? `Court: ${i.amtsgericht || i.court}.` : '',
+          i.aktenzeichen || i.caseNumber ? `Case number: ${i.aktenzeichen || i.caseNumber}.` : '',
+          (i.description || i.objektBeschreibung || '').slice(0, 250),
+        ].filter(Boolean).join(' '),
+        images: [],
+        source: 'zvg-portal.de',
+        extras: {
+          dealType: 'auction',
+          verkehrswert,
+          minBid50: minBid,
+          safetyMargin70: safetyMargin,
+          auctionDate: i.terminDatum || i.auctionDate || null,
+          court: i.amtsgericht || i.court || null,
+          caseNumber: i.aktenzeichen || i.caseNumber || null,
+        },
+      };
+    },
+  },
+
+  ES: {
+    name: 'BOE.es Subastas (Spanish judicial auctions)',
+    actorId: 'signalflow/spain-auction-scout',
+    buildInput: (p) => ({
+      location: p.location || '',
+      maxItems: 15,
+    }),
+    normalise: (i) => {
+      const valuation = i.valoracion || i.valuation || i.marketValue || null;
+      return {
+        title: `[SUBASTA] ${i.title || i.tipo || 'Subasta judicial'}`,
+        address: i.address || i.direccion || i.localidad || '',
+        price: valuation,
+        priceUnit: 'EUR',
+        rooms: null,
+        livingArea: i.area || i.superficie || null,
+        floor: null,
+        yearBuilt: null,
+        listingUrl: i.url || 'https://subastas.boe.es',
+        description: [
+          `SUBASTA JUDICIAL (Spanish court auction).`,
+          valuation ? `Court valuation: EUR ${valuation.toLocaleString?.() || valuation}.` : '',
+          i.cargas ? `Registered charges (cargas): ${i.cargas}.` : '',
+          i.refCatastral || i.cadastralRef ? `Cadastral ref: ${i.refCatastral || i.cadastralRef}.` : '',
+          i.fechaFin || i.endDate ? `Auction closes: ${i.fechaFin || i.endDate}.` : '',
+          (i.description || '').slice(0, 250),
+        ].filter(Boolean).join(' '),
+        images: [],
+        source: 'subastas.boe.es',
+        extras: {
+          dealType: 'auction',
+          valuation,
+          cargas: i.cargas || null,
+          cadastralRef: i.refCatastral || i.cadastralRef || null,
+          auctionEnd: i.fechaFin || i.endDate || null,
+        },
+      };
+    },
+  },
+
+  // AT Ediktsdatei is insolvency-publication based (searches by debtor name or Bundesland),
+  // not property-search based — reserved for a dedicated insolvency-monitoring feature.
+  AT: null,
 };
 
-// ── Rent control cities (D5) ─────────────────────────────────────────────────
-const RENT_CONTROL_CITIES = {
-  de: ['Berlin','Hamburg','München','Frankfurt','Köln','Düsseldorf','Stuttgart','Bremen','Leipzig'],
-  es: ['Barcelona','Valencia','Madrid'],
-  fr: ['Paris','Lyon','Bordeaux','Montpellier','Grenoble','Lille','Marseille'],
-  pt: ['Lisboa','Porto'],
-  ch: [], at: [], it: [],
+// ─── Fetch auction listings ────────────────────────────────────────────────
+async function fetchAuctionListings(searchParams) {
+  const apifyToken = process.env.APIFY_TOKEN;
+  if (!apifyToken) throw new Error('APIFY_TOKEN not configured.');
+
+  const market = detectMarket(searchParams.location, searchParams.countryCode || '');
+  const auctionSource = AUCTION_CONFIG[market];
+
+  if (!auctionSource) {
+    return { listings: [], market, noActor: true, reason: `Court auction data is currently available for Germany (ZVG-Portal) and Spain (BOE.es). Market ${market} auction coverage is coming soon.` };
+  }
+
+  const input = auctionSource.buildInput(searchParams);
+  const res = await fetch(
+    `https://api.apify.com/v2/acts/${auctionSource.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
+  );
+
+  if (!res.ok) {
+    throw new Error(`${auctionSource.name} returned ${res.status} ${res.statusText}`);
+  }
+
+  const items = await res.json();
+  if (!Array.isArray(items) || items.length === 0) {
+    return { listings: [], market, portalErrors: [] };
+  }
+
+  const listings = items.slice(0, 15).map(item => {
+    try { return auctionSource.normalise(item); } catch { return null; }
+  }).filter(Boolean);
+
+  // Filter by price range against Verkehrswert if provided
+  const filtered = listings.filter(l => {
+    if (searchParams.minPrice && l.price && l.price < searchParams.minPrice) return false;
+    if (searchParams.maxPrice && l.price && l.price > searchParams.maxPrice) return false;
+    return true;
+  });
+
+  return { listings: filtered, market, portalErrors: [] };
+}
+
+// ─── Market detection ──────────────────────────────────────────────────────
+// Two-pass: (1) explicit countryCode, (2) full country names, (3) major cities,
+// (4) two-letter codes ONLY as ", xx" suffix — prevents "Ciudad de Mexico" → DE bug.
+function detectMarket(location = '', countryCode = '') {
+  const code = (countryCode || '').toUpperCase();
+  if (code && PORTAL_CONFIG[code] !== undefined) return code;
+  const loc = location.toLowerCase();
+
+  // Pass 1 — full country names (unambiguous)
+  if (/switzerland|schweiz|suisse|svizzera/.test(loc)) return 'CH';
+  if (/germany|deutschland/.test(loc)) return 'DE';
+  if (/austria|österreich|oesterreich/.test(loc)) return 'AT';
+  if (/united kingdom|england|scotland|wales/.test(loc) || /\buk\b/.test(loc)) return 'GB';
+  if (/france/.test(loc)) return 'FR';
+  if (/portugal/.test(loc)) return 'PT';
+  if (/\bitaly\b|\bitalia\b/.test(loc)) return 'IT';
+  if (/spain|españa|espana/.test(loc)) return 'ES';
+  if (/united states|\busa\b/.test(loc)) return 'US';
+  if (/\bcanada\b/.test(loc)) return 'CA';
+  if (/\buae\b|emirates/.test(loc)) return 'AE';
+  if (/saudi arabia|\bsaudi\b/.test(loc)) return 'SA';
+  if (/australia/.test(loc)) return 'AU';
+  if (/brazil|brasil/.test(loc)) return 'BR';
+  if (/\bmexico\b|méxico/.test(loc)) return 'MX';
+  if (/colombia/.test(loc)) return 'CO';
+  if (/argentina/.test(loc)) return 'AR';
+  if (/singapore/.test(loc)) return 'SG';
+  if (/malaysia/.test(loc)) return 'MY';
+  if (/thailand/.test(loc)) return 'TH';
+  if (/south africa|nigeria|kenya|namibia|botswana|zimbabwe|zambia|tanzania|mozambique/.test(loc)) return 'ZA';
+  if (/ukraine/.test(loc)) return 'UA';
+  if (/\bjapan\b/.test(loc)) return 'JP';
+  if (/\bindia\b/.test(loc)) return 'IN';
+
+  // Pass 2 — major cities (unambiguous)
+  if (/zürich|zurich|\bbern\b|aarau|basel|luzern|aargau|\bzug\b|lausanne|winterthur|boniswil|st\.? gallen/.test(loc)) return 'CH';
+  if (/berlin|münchen|munich|hamburg|frankfurt|köln|cologne|stuttgart|düsseldorf|leipzig|dresden/.test(loc)) return 'DE';
+  if (/\bwien\b|vienna|salzburg|\bgraz\b|innsbruck|\blinz\b/.test(loc)) return 'AT';
+  if (/london|manchester|birmingham|edinburgh|bristol|leeds|glasgow|liverpool/.test(loc)) return 'GB';
+  if (/\bparis\b|\blyon\b|marseille|bordeaux|toulouse|\bnice\b|nantes|strasbourg/.test(loc)) return 'FR';
+  if (/lisboa|lisbon|\bporto\b|algarve|cascais|\bfaro\b|braga|sintra/.test(loc)) return 'PT';
+  if (/\broma\b|\brome\b|milan|milano|florence|firenze|naples|napoli|venice|venezia|torino|turin/.test(loc)) return 'IT';
+  if (/madrid|barcelona|sevilla|seville|valencia|malaga|málaga|asturias|gijón|gijon|bilbao|alicante/.test(loc)) return 'ES';
+  if (/new york|los angeles|chicago|houston|miami|san francisco|seattle|boston|atlanta|denver|austin|dallas/.test(loc)) return 'US';
+  if (/toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg/.test(loc)) return 'CA';
+  if (/\bdubai\b|abu dhabi|sharjah|ajman/.test(loc)) return 'AE';
+  if (/riyadh|jeddah|mecca|medina|dammam/.test(loc)) return 'SA';
+  if (/sydney|melbourne|brisbane|perth|adelaide|canberra|gold coast|hobart/.test(loc)) return 'AU';
+  if (/são paulo|sao paulo|rio de janeiro|belo horizonte|brasilia|curitiba/.test(loc)) return 'BR';
+  if (/ciudad de mexico|\bcdmx\b|guadalajara|monterrey|cancún|cancun|tijuana/.test(loc)) return 'MX';
+  if (/bogota|bogotá|medellin|medellín|\bcali\b|cartagena/.test(loc)) return 'CO';
+  if (/buenos aires|cordoba|córdoba|rosario|mendoza/.test(loc)) return 'AR';
+  if (/kuala lumpur|penang|johor bahru/.test(loc)) return 'MY';
+  if (/bangkok|phuket|chiang mai|pattaya/.test(loc)) return 'TH';
+  if (/cape town|johannesburg|durban|sandton|pretoria|nairobi|lagos|windhoek/.test(loc)) return 'ZA';
+  if (/kyiv|kiev|lviv|odesa|kharkiv/.test(loc)) return 'UA';
+  if (/tokyo|osaka|kyoto|yokohama|nagoya/.test(loc)) return 'JP';
+  if (/mumbai|delhi|bangalore|bengaluru|hyderabad|chennai|pune/.test(loc)) return 'IN';
+
+  // Pass 3 — two-letter codes ONLY as explicit ", xx" suffix (safe)
+  const suffixMatch = loc.match(/,\s*([a-z]{2})\s*$/);
+  if (suffixMatch) {
+    const cc = suffixMatch[1].toUpperCase();
+    if (PORTAL_CONFIG[cc] !== undefined) return cc;
+  }
+
+  return 'CH'; // default core market
+}
+
+// ─── Resolve alias entries ─────────────────────────────────────────────────
+function resolvePortals(market, searchParams) {
+  const config = PORTAL_CONFIG[market];
+  if (!config) return null;
+  return config.map(entry => {
+    if (entry.alias) {
+      const parent = PORTAL_CONFIG[entry.alias];
+      if (!parent) return null;
+      const base = { ...parent[0] };
+      const aliasCountry = entry.country;
+      const aliasSource = entry.source;
+      return {
+        ...base,
+        name: `${base.name} (${market})`,
+        buildInput: (p) => base.buildInput({ ...p, country: aliasCountry }),
+        normalise: (i) => ({ ...base.normalise(i), source: aliasSource || base.normalise(i).source }),
+      };
+    }
+    return entry;
+  }).filter(Boolean);
+}
+
+// ─── Fetch from Apify portals (search mode) ───────────────────────────────
+async function fetchListings(searchParams) {
+  const apifyToken = process.env.APIFY_TOKEN;
+  if (!apifyToken) throw new Error('APIFY_TOKEN not configured.');
+
+  const market = detectMarket(searchParams.location, searchParams.countryCode || '');
+  const config = PORTAL_CONFIG[market];
+
+  if (!config) {
+    return { listings: [], market, noActor: true, reason: `Market ${market} not yet supported` };
+  }
+
+  const portals = resolvePortals(market, searchParams);
+  if (!portals || portals.length === 0) {
+    return { listings: [], market, noActor: true, reason: `No actor configured for ${market}` };
+  }
+
+  const results = await Promise.allSettled(
+    portals.map(async (portal) => {
+      const input = portal.buildInput(searchParams);
+      const res = await fetch(
+        `https://api.apify.com/v2/acts/${portal.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
+      );
+      if (!res.ok) throw new Error(`${portal.name} → ${res.status} ${res.statusText}`);
+      const items = await res.json();
+      return { portal: portal.name, items: Array.isArray(items) ? items : [] };
+    })
+  );
+
+  const listings = [], portalErrors = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i], portal = portals[i];
+    if (r.status === 'fulfilled') {
+      listings.push(...r.value.items.slice(0, 10).map(item => {
+        try { return portal.normalise(item); } catch { return null; }
+      }).filter(Boolean));
+    } else {
+      portalErrors.push(`${portal.name}: ${r.reason?.message}`);
+    }
+  }
+
+  const seen = new Set();
+  const deduped = listings.filter(l => {
+    if (!l.listingUrl || seen.has(l.listingUrl)) return false;
+    seen.add(l.listingUrl);
+    return true;
+  });
+
+  return { listings: deduped.slice(0, 15), market, portalErrors };
+}
+
+// ─── URL-based single listing fetch ───────────────────────────────────────
+function getHostname(url) {
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); }
+  catch { return null; }
+}
+
+async function fetchListingByUrl(listingUrl, countryCode) {
+  const apifyToken = process.env.APIFY_TOKEN;
+  if (!apifyToken) throw new Error('APIFY_TOKEN not configured.');
+
+  const host = getHostname(listingUrl);
+  const scraper = host ? URL_SCRAPER_MAP[host] : null;
+
+  if (!scraper) {
+    throw new Error(`No URL scraper available for ${host || listingUrl}. Please enter the property details manually.`);
+  }
+
+  // Most actors accept [{url}], a few want plain strings — send object form
+  // (Apify's requestListSources standard) and let 400s trigger a string retry.
+  let input = { [scraper.inputKey]: [{ url: listingUrl }], maxItems: 1 };
+
+  const endpoint = `https://api.apify.com/v2/acts/${scraper.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`;
+  let res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+
+  // Retry once with plain-string URL array if the object form was rejected
+  if (res.status === 400) {
+    input = { [scraper.inputKey]: [listingUrl], maxItems: 1 };
+    res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+  }
+
+  if (!res.ok) {
+    throw new Error(`Scraper returned ${res.status}. The listing may require a login or have been removed.`);
+  }
+
+  const items = await res.json();
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('No data returned for this listing. It may be delisted or require login.');
+  }
+
+  const market = countryCode || detectMarket(listingUrl, '');
+  const portals = PORTAL_CONFIG[market] ? resolvePortals(market, {}) : null;
+  const portal = portals?.[0];
+
+  let listing;
+  try {
+    listing = portal ? portal.normalise(items[0]) : {
+      title: items[0].title || items[0].name || items[0].address || 'Property',
+      address: items[0].address || items[0].location || '',
+      price: items[0].price || items[0].listPrice || null,
+      priceUnit: items[0].currency || items[0].priceUnit || null,
+      rooms: items[0].rooms || items[0].bedrooms || items[0].numberOfRooms || null,
+      livingArea: items[0].livingArea || items[0].area || items[0].size || null,
+      floor: items[0].floor || null,
+      yearBuilt: items[0].yearBuilt || items[0].constructionYear || null,
+      listingUrl,
+      description: (items[0].description || '').slice(0, 500) || null,
+      images: (items[0].images || items[0].imageUrls || []).slice(0, 2),
+      source: host || 'portal',
+      extras: {},
+    };
+  } catch {
+    listing = {
+      title: 'Property', address: '', price: null, priceUnit: null,
+      rooms: null, livingArea: null, floor: null, yearBuilt: null,
+      listingUrl, description: JSON.stringify(items[0]).slice(0, 500),
+      images: [], source: host || 'portal', extras: {},
+    };
+  }
+
+  return { listing, market };
+}
+
+// ─── Perplexity Sonar (reserved — not yet active) ─────────────────────────
+async function fetchPerplexityListings(_searchParams) {
+  // RESERVED FOR FUTURE INTEGRATION — activate when PERPLEXITY_API_KEY is set
+  return [];
+}
+
+// ─── D9 legal rules per market ────────────────────────────────────────────
+const D9_RULES = {
+  CH: 'Lex Koller (foreign buyer restrictions on residential property), Stockwerkeigentum strata rules, cantonal zoning, FINMA AML for funds',
+  DE: 'Grundbuch title register, Mietrecht tenant protections, Grunderwerbsteuer 3.5–6.5%, Bebauungsplan zoning',
+  AT: 'Grundbuch, Wohnungseigentumsgesetz, foreign buyer restrictions in some Bundesländer, Grunderwerbsteuer 3.5%',
+  GB: 'SDLT/LTT stamp duty, leasehold vs freehold, EPC minimum E, Section 21 abolition, planning use class',
+  FR: 'DPE energy rating mandatory, Taxe Foncière, copropriété rules, Loi Pinel, PTZ eligibility',
+  ES: 'ITP/AJD transfer tax 6–10%, Ley de Arrendamientos Urbanos rent controls, Cadastral vs market value',
+  PT: 'NHR/IFICI tax regime, IMT transfer tax 0–7.5%, Golden Visa residential abolished, ARU urban rehab zones',
+  IT: 'Catasto cadastral values, IMU property tax, Superbonus eligibility, Codice del Consumo disclosures',
+  US: 'HOA rules, local zoning/setbacks, FIRPTA for foreign sellers, FEMA flood zone, 1031 exchange eligibility',
+  CA: 'Foreign Buyer Ban 2023, FINTRAC AML, land transfer tax, condo/strata act, foreign buyer tax in BC/ON',
+  AE: 'RERA Dubai regulations, Trakheesi permit verification, off-plan escrow, DLD transfer fees 4%',
+  SA: 'Saudi Investment Law, foreign ownership in NEOM/Vision 2030 zones, Riyali AML compliance',
+  AU: 'FIRB foreign investment approval, stamp duty, strata title, auction clearance, negative gearing',
+  BR: 'ITBI transfer tax ~3%, IPTU annual property tax, condomínio fees, foreign ownership generally permitted',
+  MX: 'Fideicomiso trust for foreign buyers in coastal/border zones, ISAI transfer tax ~2–4%',
+  CO: 'Impuesto de Delineación Urbana, Catastro valuation, restitución de tierras risk in rural areas',
+  AR: 'Currency controls (CEPO), AFIP registration, peso vs USD pricing, foreign restrictions on rural land',
+  SG: 'ABSD 60% for foreigners, SLA approval, strata title vs 99yr leasehold',
+  MY: 'MM2H visa programme, RPGT capital gains, foreign threshold MYR 1M+, Malay reserved land',
+  TH: 'Foreign freehold condo quota 49%, Chanote title deed, 30+30yr lease for houses',
+  ZA: 'FICA AML compliance, Transfer Duty, HOA special levies, Sectional Title Act',
+  UA: 'Wartime restrictions, agricultural land moratorium, title registry disruptions, reconstruction risk zones',
+  JP: 'No foreign ownership restrictions, Jutakuchi-ho building standards, seismic compliance, fixed-term leases',
+  IN: 'RERA 2016, foreign ownership restricted to NRI/OCI, stamp duty 5–8%, benami prohibition',
 };
 
-// ── Price trend reference data by market (D7) ─────────────────────────────────
-// Source: Eurostat HPI + national statistics, updated quarterly
-const PRICE_TREND = {
-  ch: { growth1yr: 0.03, growth3yr: 0.12, volatility: 'low',  source: 'SNB / BFS 2025' },
-  de: { growth1yr: 0.01, growth3yr: -0.04, volatility: 'medium', source: 'Bundesbank 2025' },
-  at: { growth1yr: 0.00, growth3yr: 0.02, volatility: 'medium', source: 'OeNB 2025' },
-  es: { growth1yr: 0.13, growth3yr: 0.28, volatility: 'medium', source: 'INE HPI Q1 2025' },
-  pt: { growth1yr: 0.09, growth3yr: 0.25, volatility: 'medium', source: 'INE PT 2025' },
-  it: { growth1yr: 0.03, growth3yr: 0.08, volatility: 'low',  source: 'ISTAT OMI 2025' },
-  fr: { growth1yr: -0.03, growth3yr: 0.04, volatility: 'medium', source: 'Notaires de France 2025' },
+const CURRENCY_MAP = {
+  CH:'CHF', DE:'EUR', AT:'EUR', GB:'GBP', FR:'EUR', ES:'EUR', PT:'EUR', IT:'EUR',
+  US:'USD', CA:'CAD', AE:'AED', SA:'SAR', AU:'AUD',
+  BR:'BRL', MX:'MXN', CO:'COP', AR:'USD', SG:'SGD', MY:'MYR', TH:'THB',
+  ZA:'ZAR', UA:'UAH', JP:'JPY', IN:'INR',
 };
 
-// ── Minimum comparable count for reliable D1 scoring ─────────────────────────
-const MIN_COMPARABLES = 5;
+// ─── Anti-hallucination output validation ─────────────────────────────────
+// Enforces: results must map to real scraped listings, scores clamped 0-10,
+// D9 suppression rule applied in code (not just prompt), prices from real data.
+function validateScoredOutput(scored, realListings) {
+  if (!scored || !Array.isArray(scored.results)) return scored;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MAIN HANDLER
-// ─────────────────────────────────────────────────────────────────────────────
-module.exports = async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const realUrls = new Set(realListings.map(l => l.listingUrl).filter(Boolean));
+  const realByUrl = {};
+  realListings.forEach(l => { if (l.listingUrl) realByUrl[l.listingUrl] = l; });
+
+  const clamp = (n) => Math.max(0, Math.min(10, Number(n) || 0));
+
+  scored.results = scored.results
+    // Keep only results traceable to a real scraped listing
+    .filter(r => {
+      if (realUrls.size === 0) return true; // single-listing URL mode may lack URLs
+      return r.listingUrl && realUrls.has(r.listingUrl);
+    })
+    .map((r, idx) => {
+      const real = r.listingUrl ? realByUrl[r.listingUrl] : realListings[idx];
+
+      // Force price/currency/address from REAL data — never trust model output for facts
+      if (real) {
+        r.price = real.price ?? r.price;
+        r.priceUnit = real.priceUnit || r.priceUnit;
+        r.address = real.address || r.address;
+        r.title = real.title || r.title;
+        r.source = real.source || r.source;
+        r.listingUrl = real.listingUrl || r.listingUrl;
+        r.livingArea = real.livingArea ?? r.livingArea;
+      }
+
+      // Clamp all dimension scores 0-10
+      if (r.dimensions) {
+        for (const key of Object.keys(r.dimensions)) {
+          if (r.dimensions[key] && typeof r.dimensions[key].score !== 'undefined') {
+            r.dimensions[key].score = clamp(r.dimensions[key].score);
+          }
+        }
+      }
+      r.compositeScore = clamp(r.compositeScore);
+
+      // Enforce D9 suppression rule server-side — threshold raised to 4.0 (v5)
+      const d9 = r.dimensions?.D9?.score;
+      if (typeof d9 === 'number' && d9 < 4.0 && r.compositeScore > 5.0) {
+        r.compositeScore = 5.0;
+        r.suppressed = true;
+        r.suppressionReason = r.suppressionReason || `D9 Legal & Regulatory score ${d9.toFixed(1)} < 4.0 — composite capped at 5.0`;
+      }
+
+      return r;
+    });
+
+  // Re-rank after filtering
+  scored.results.sort((a, b) => (b.compositeScore || 0) - (a.compositeScore || 0));
+  scored.results.forEach((r, i) => { r.rank = i + 1; });
+
+  if (scored.searchMeta) {
+    scored.searchMeta.validated = true;
+    scored.searchMeta.listingsFound = scored.results.length;
+  }
+
+  return scored;
+}
+
+// ─── Build scoring prompt ──────────────────────────────────────────────────
+function buildScoringPrompt(listings, searchParams, market, isAuction = false) {
+  const currency = CURRENCY_MAP[market] || 'USD';
+
+  const auctionGuidance = isAuction ? `
+
+AUCTION-SPECIFIC SCORING GUIDANCE (these are COURT FORECLOSURE AUCTIONS, not regular listings):
+- The listed "price" is the court-assessed Verkehrswert/valuation, NOT an asking price. Acquisition below this value is the core opportunity.
+- D1 Valuation: Score the SPREAD — legal minimum bid is 50% of Verkehrswert; creditor objection threshold is 70%. Realistic acquisition at 60-75% of Verkehrswert is a strong D1 signal (8+).
+- D8 Seller Motivation: Foreclosures are maximum-motivation by definition — score execution risk instead: competing bidders, creditor behaviour, possible auction withdrawal.
+- D9 Legal: Add auction-specific risks — no warranty (gekauft wie gesehen), no interior viewing before auction, occupants/tenants (Raeumung risk), surviving charges (Sicherungshypotheken), 10% security deposit due at auction.
+- Flag prominently: interior condition is UNKNOWN in most foreclosures. Renovation estimates must be conservative.
+- Composite for auctions rewards deep value spreads but must reflect execution and condition uncertainty.` : '';
+
+  const listingsSummary = listings.map((l, i) => `
+LISTING ${i+1}:
+- Title: ${l.title}
+- Address: ${l.address}
+- Price: ${l.price ? `${l.priceUnit||currency} ${typeof l.price==='number'?l.price.toLocaleString():l.price}` : 'Not disclosed'}
+- Rooms/Beds: ${l.rooms || 'N/A'}
+- Area: ${l.livingArea ? `${l.livingArea}m²` : 'N/A'}
+- Year built: ${l.yearBuilt || 'N/A'}
+- Source: ${l.source} — ${l.listingUrl || 'no URL'}
+- Description: ${l.description || 'N/A'}
+${l.extras && Object.keys(l.extras).length ? `- Extra: ${JSON.stringify(l.extras)}` : ''}`
+  ).join('\n---\n');
+
+  return `You are the 9D scoring engine for get9d.com — professional property intelligence for EAMs and family offices.
+
+REAL listings from live portals are provided below. Score ONLY these listings. Never invent properties.
+If data is missing for a dimension, apply conservative default (5.0) and note it.
+Currency for this market: ${currency}
+
+9D FRAMEWORK (0–10 each):
+D1 Valuation & Renovation — Price vs condition-adjusted comps, price/m², renovation signals, comparable set quality A/B/C
+D2 Climate Risk — Flood zone (Copernicus), wildfire, heat stress, seismic, insurability, EPC/DPE/Minergie rating
+D3 Demographic Trend — Municipal population 5yr/10yr, household formation, purchasing power, migration flows
+D4 Return on Investment — NET yield on total invested capital; apply country transaction costs (${market==='CH'?'~5.5%':market==='DE'?'~10.6% varies by Bundesland':market==='ES'?'~12.6%':market==='PT'?'~8.8%':market==='FR'?'~12%':'~10%'}); rent control cap at 6.0; vacancy drag
+D5 Rental / Vacancy — Vacancy at postcode, days-to-let, rental trend, short-term rental viability; if RENT CONTROL ZONE applies flag it in tags_warning and reduce score by 1.5; if DPE F/G (France) flag rental restriction
+D6 Liveability & Proximity — Schools, grocery, transit frequency, healthcare, airport, parks; score by category
+D7 Price Trend — Historical HPI at national/regional level (NOT a forward prediction); 1yr and 3yr CAGR, supply constraint, confirmed infrastructure only; NEVER claim certainty about future values
+D8 Seller Motivation — Days-on-market vs market median, price cut count and total %, re-listing after withdrawal, auction type, distress language; return signals as a LIST of specific observable evidence (not summary)
+D9 Legal & Regulatory — ${D9_RULES[market] || 'Local property law, title integrity, AML compliance'}; agency registration check; encumbrance flags; energy rating disclosure
+
+SUPPRESSION RULE: D9 score < 4.0 → cap composite at 5.0, set suppressed:true, explain suppressionReason.
+COMPOSITE: D1×15% + D2×10% + D3×10% + D4×15% + D5×10% + D6×10% + D7×10% + D8×10% + D9×10%${auctionGuidance}
+
+OUTPUT REQUIREMENTS (apply to every dimension):
+- confidence: "high" (15+ comparable data points, recent data), "medium" (5-14 or older data), "low" (<5 points, extrapolated, or missing source)
+- key_inputs: array of 2-4 strings each showing one real data point used ("Asking €3,200/m² vs area median €2,850/m²", "Listed 214 days vs market median 55 days", etc.)
+- D8 must include signals: array of objects {signal, text, weight:"high"|"medium"|"low"} — one entry per observable evidence item
+- D9 must include flags: array of objects {type, level:"info"|"warning"|"critical", message} covering agency reg, energy disclosure, encumbrances, auction-specific risks
+- D7 must include disclaimer: "Historical price data only. Past performance does not predict future values."
+- D9 must include disclaimer: "D9 is based on observable public data only. Independent legal due diligence by a qualified local lawyer is mandatory before any property transaction. get9d does not provide legal advice."
+- If fewer than 5 comparables exist for D1, set state:"LIMITED_DATA", score:null, and explain why — never fabricate a D1 score from thin data
+
+SEARCH: ${market} | ${searchParams.location} | ${searchParams.propertyType==='rent'?'Rental':'Purchase'}${searchParams.minPrice?` | Min ${currency} ${searchParams.minPrice}`:''}${searchParams.maxPrice?` | Max ${currency} ${searchParams.maxPrice}`:''}${searchParams.minRooms?` | Min rooms: ${searchParams.minRooms}`:''}
+
+REAL LISTINGS (${listings.length}):
+${listingsSummary}
+
+Respond ONLY in valid JSON — no preamble, no markdown fences:
+{"results":[{"rank":1,"title":"...","address":"...","price":0,"priceUnit":"${currency}","listingUrl":"...","source":"...","compositeScore":7.4,"suppressed":false,"suppressionReason":null,"dimensions":{"D1":{"score":7.0,"state":"SCORED","label":"Valuation & Renovation","confidence":"medium","key_inputs":["Asking €X/m² vs area median €Y/m²","N comparables used"],"rationale":"...","self_critical":"...","tags_positive":[],"tags_warning":[]},"D2":{"score":7.5,"label":"Climate Risk","confidence":"high","key_inputs":["Flood zone: moderate","Wildfire: low"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D3":{"score":7.5,"label":"Demographic Trend","confidence":"medium","key_inputs":["Population +X% 5yr","Household formation: positive"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D4":{"score":6.0,"label":"Return on Investment","confidence":"medium","key_inputs":["Gross yield ~X%","Net yield ~Y% after ~Z% transaction costs","Rent control: no"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D5":{"score":7.0,"label":"Rental / Vacancy","confidence":"medium","key_inputs":["Avg rent €X/m²","Vacancy: low"],"rationale":"...","rentControlFlag":false,"tags_positive":[],"tags_warning":[]},"D6":{"score":9.0,"label":"Liveability & Proximity","confidence":"high","key_inputs":["Transit: excellent","Schools: within 500m"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D7":{"score":7.5,"label":"Price Trend","confidence":"medium","key_inputs":["1yr HPI: +X%","3yr CAGR: +Y%"],"rationale":"...","disclaimer":"Historical price data only. Past performance does not predict future values.","tags_positive":[],"tags_warning":[]},"D8":{"score":6.5,"label":"Seller Motivation","confidence":"high","key_inputs":["Listed N days","N price reductions"],"signals":[{"signal":"STALE_LISTING","text":"Listed 214 days vs market median 55 days","weight":"high"}],"rationale":"...","tags_positive":[],"tags_warning":[]},"D9":{"score":8.0,"label":"Legal & Regulatory","confidence":"medium","key_inputs":["Agency registered: yes","Encumbrances: none found","EPC: disclosed"],"flags":[],"rationale":"...","disclaimer":"D9 is based on observable public data only. Independent legal due diligence by a qualified local lawyer is mandatory before any property transaction. get9d does not provide legal advice.","tags_positive":[],"tags_warning":[]}},"flags":[],"summary":"Two-sentence investment thesis."}],"searchMeta":{"location":"${searchParams.location}","market":"${market}","listingsFound":${listings.length},"dataSource":"${isAuction ? 'court auction data via Apify (ZVG/BOE)' : 'live portal data via Apify'}","scoredAt":"${new Date().toISOString()}"}}`;
+}
+
+// ─── Main handler ──────────────────────────────────────────────────────────
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { url, address, tier = 'free' } = req.body || {};
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured.' });
 
-  if (!url && !address) {
-    return res.status(400).json({ error: 'url or address required' });
+  const body = req.body ?? {};
+
+  // ── Proxy mode (passthrough for direct Claude calls from frontend)
+  if (body.mode === 'proxy' || (!body.mode && body.messages)) {
+    const { model, messages, system, max_tokens, tools, tool_choice } = body;
+    if (!model || !ALLOWED_MODELS.includes(model)) return res.status(400).json({ error: 'Invalid model', allowed: ALLOWED_MODELS });
+    if (!Array.isArray(messages) || !messages.length) return res.status(400).json({ error: 'messages required' });
+    const clampedTokens = Math.min(typeof max_tokens==='number'&&max_tokens>0?max_tokens:MAX_TOKENS_CAP, MAX_TOKENS_CAP);
+    try {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-beta':'web-search-2025-03-05' },
+        body: JSON.stringify({ model, messages, max_tokens: clampedTokens, ...(system&&{system}), ...(tools&&{tools}), ...(tool_choice&&{tool_choice}) }),
+      });
+      return res.status(r.status).json(await r.json());
+    } catch (e) { return res.status(500).json({ error: 'Proxy failed', detail: e.message }); }
   }
 
-  try {
-    // 1. Detect market
-    const market = detectMarket(url || address);
-    if (!market) {
-      return res.status(422).json({
-        error: 'MARKET_UNSUPPORTED',
-        message: 'Supported markets: CH, DE, AT, ES, PT, IT, FR',
+  // ── URL mode: scrape a specific listing URL then score it
+  if (body.mode === 'url') {
+    const { listingUrl, countryCode, model } = body;
+    if (!listingUrl) return res.status(400).json({ error: 'listingUrl is required for url mode' });
+
+    const scoringModel = ALLOWED_MODELS.includes(model) ? model : 'claude-sonnet-4-6';
+
+    let listing, market;
+    try {
+      const result = await fetchListingByUrl(listingUrl, countryCode);
+      listing = result.listing;
+      market = result.market;
+    } catch (err) {
+      return res.status(200).json({
+        error: 'url_scrape_failed',
+        message: err.message,
       });
     }
 
-    // 2. Fetch listing data — HARD FAIL if unavailable
-    const listing = await fetchListing(url, address, market);
-    if (!listing || !listing.price) {
-      return res.status(422).json({
-        error: 'LISTING_UNAVAILABLE',
-        message: 'Could not retrieve listing data. Verify the URL is active and publicly accessible.',
+    const searchParams = { location: listing.address || listingUrl, propertyType: 'buy', countryCode };
+
+    try {
+      const ar = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01' },
+        body: JSON.stringify({ model: scoringModel, max_tokens: MAX_TOKENS_CAP, messages: [{ role: 'user', content: buildScoringPrompt([listing], searchParams, market) }] }),
+      });
+      const ad = await ar.json();
+      if (!ar.ok) return res.status(ar.status).json({ error: 'Scoring failed', detail: ad });
+
+      const rawText = ad.content?.[0]?.text || '';
+      let scored;
+      try { scored = JSON.parse(rawText.replace(/```json|```/g,'').trim()); }
+      catch { return res.status(500).json({ error: 'Failed to parse scoring response', raw: rawText }); }
+
+      scored = validateScoredOutput(scored, [listing]);
+      scored.rawListings = [listing];
+      scored.mode = 'url';
+      return res.status(200).json(scored);
+    } catch (e) {
+      return res.status(500).json({ error: 'Scoring failed', detail: e.message });
+    }
+  }
+
+  // ── Score mode: search by location and score results
+  // dealType: 'standard' (default, portal listings) | 'auction' (court foreclosures)
+  if (body.mode === 'score') {
+    const { location, minPrice, maxPrice, minRooms, maxRooms, propertyType, countryCode, model, dealType } = body;
+    if (!location) return res.status(400).json({ error: 'location is required' });
+
+    const scoringModel = ALLOWED_MODELS.includes(model) ? model : 'claude-sonnet-4-6';
+    const searchParams = { location, minPrice, maxPrice, minRooms, maxRooms, propertyType, countryCode };
+    const market = detectMarket(location, countryCode || '');
+    const isAuction = dealType === 'auction';
+
+    let listings = [], portalErrors = [];
+
+    try {
+      const result = isAuction
+        ? await fetchAuctionListings(searchParams)
+        : await fetchListings(searchParams);
+      listings = result.listings || [];
+      portalErrors = result.portalErrors || [];
+
+      if (result.noActor) {
+        return res.status(200).json({
+          error: isAuction ? 'auction_market_not_supported' : 'market_not_supported',
+          message: result.reason || `Live portal data is not yet available for this market. Perplexity Sonar integration coming soon.`,
+          market, results: [],
+          searchMeta: { location, market, listingsFound: 0, dataSource: 'none', scoredAt: new Date().toISOString() },
+        });
+      }
+    } catch (err) {
+      portalErrors.push(err.message);
+    }
+
+    if (listings.length === 0) {
+      return res.status(200).json({
+        error: 'no_listings_found',
+        message: isAuction
+          ? `No court auctions currently listed for "${location}". Auction inventory changes weekly — try a whole Bundesland (e.g. "Bayern") or check back soon.`
+          : `No listings found for "${location}". Try a larger city, broader price range, or fewer filters.`,
+        market, portalErrors, results: [],
+        searchMeta: { location, market, listingsFound: 0, dataSource: 'none — hallucination prevention active', scoredAt: new Date().toISOString() },
       });
     }
 
-    // 3. Fetch comparables (parallel with rental data)
-    const [comparables, rentals] = await Promise.all([
-      fetchComparables(listing, market),
-      fetchRentals(listing, market),
-    ]);
+    try {
+      const ar = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01' },
+        body: JSON.stringify({ model: scoringModel, max_tokens: MAX_TOKENS_CAP, messages: [{ role: 'user', content: buildScoringPrompt(listings, searchParams, market, isAuction) }] }),
+      });
+      const ad = await ar.json();
+      if (!ar.ok) return res.status(ar.status).json({ error: 'Scoring failed', detail: ad });
 
-    // 4. Score all dimensions
-    const d1 = scoreValuation(listing, comparables);
-    const d2 = scoreClimate(listing, market);
-    const d3 = scoreDemographic(listing, market);
-    const d4 = scoreROI(listing, comparables, rentals, market);
-    const d5 = scoreRentalVacancy(listing, rentals, market);
-    const d6 = scoreLiveability(listing, market);
-    const d7 = scorePriceTrend(listing, market);
-    const d8 = scoreSellerMotivation(listing, market);
-    const d9 = scoreLegal(listing, market);
+      const rawText = ad.content?.[0]?.text || '';
+      let scored;
+      try { scored = JSON.parse(rawText.replace(/```json|```/g,'').trim()); }
+      catch { return res.status(500).json({ error: 'Failed to parse scoring response', raw: rawText }); }
 
-    // 5. Composite + D9 suppression
-    const allScores = { d1, d2, d3, d4, d5, d6, d7, d8, d9 };
-    const { composite, suppressed, rating } = buildComposite(allScores, tier);
+      scored = validateScoredOutput(scored, listings);
 
-    // 6. Apply tier gating — blank out dimensions above tier entitlement
-    const dimensions = gateDimensions(allScores, tier);
+      // If validation stripped everything, the model returned untraceable results — refuse
+      if (!scored.results || scored.results.length === 0) {
+        return res.status(200).json({
+          error: 'validation_failed',
+          message: 'Scored results could not be verified against real listing data. Please try again.',
+          market, results: [],
+          searchMeta: { location, market, listingsFound: 0, dataSource: 'validation rejected output', scoredAt: new Date().toISOString() },
+        });
+      }
 
-    // 7. Build response
-    return res.status(200).json({
-      property: {
-        url: listing.url,
-        address: listing.address,
-        market,
-        type: listing.propertyType,
-        sqm: listing.sqm,
-        priceSqm: listing.priceSqm,
-        price: listing.price,
-        bedrooms: listing.bedrooms,
-        listingPortal: listing.portal,
-        isAuction: listing.isAuction || false,
-      },
-      score: { composite, suppressed, rating, tier },
-      dimensions,
-      meta: {
-        scoredAt: new Date().toISOString(),
-        version: '5.0',
-        comparablesUsed: comparables.length,
-        rentalsUsed: rentals.length,
-        d9Disclaimer: 'This output is based on publicly available data only and does not constitute legal advice, financial advice, or a guarantee of title clarity. Independent legal due diligence by a qualified local lawyer is required before any property transaction.',
-      },
-    });
-
-  } catch (err) {
-    console.error('[score.js] Error:', err);
-    return res.status(500).json({
-      error: 'SCORING_FAILED',
-      message: err.message || 'Scoring engine error. Please retry.',
-    });
-  }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MARKET DETECTION
-// ─────────────────────────────────────────────────────────────────────────────
-function detectMarket(input) {
-  const s = input.toLowerCase();
-  if (s.includes('homegate.ch') || s.includes('immoscout24.ch') || s.includes('.ch/'))  return 'ch';
-  if (s.includes('immobilienscout24.de') || s.includes('immowelt.de') || s.includes('.de/')) return 'de';
-  if (s.includes('willhaben.at') || s.includes('.at/')) return 'at';
-  if (s.includes('idealista.com/es') || s.includes('fotocasa.es') || s.includes('.es/')) return 'es';
-  if (s.includes('idealista.pt') || s.includes('imovirtual.com') || s.includes('.pt/'))  return 'pt';
-  if (s.includes('immobiliare.it') || s.includes('casa.it') || s.includes('.it/'))       return 'it';
-  if (s.includes('seloger.com') || s.includes('leboncoin.fr') || s.includes('.fr/'))     return 'fr';
-  if (s.includes('zvg.de') || s.includes('zvg-portal')) return 'de';
-  if (s.includes('boe.es') || s.includes('subastas.boe')) return 'es';
-  return null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DATA FETCHERS (Apify)
-// ─────────────────────────────────────────────────────────────────────────────
-async function runApify(actorId, input, timeoutSecs = 45) {
-  const run = await apify.actor(actorId).call(input, { timeoutSecs });
-  if (!run || run.status === 'FAILED') throw new Error(`Apify actor ${actorId} failed`);
-  const { items } = await apify.dataset(run.defaultDatasetId).listItems({ limit: 100 });
-  return items || [];
-}
-
-async function fetchListing(url, address, market) {
-  const actorId = ACTORS[market];
-  if (!actorId) return null;
-
-  const items = await runApify(actorId, {
-    startUrls: url ? [{ url }] : [],
-    query: address || '',
-    maxItems: 1,
-  });
-
-  if (!items.length) return null;
-  const raw = items[0];
-  return normalizeListing(raw, market, url);
-}
-
-async function fetchComparables(listing, market) {
-  const actorId = ACTORS[market];
-  if (!actorId || !listing.postalCode) return [];
-
-  const items = await runApify(actorId, {
-    query: listing.postalCode,
-    propertyType: listing.propertyType,
-    maxItems: 30,
-  });
-
-  return items
-    .map(i => normalizeListing(i, market))
-    .filter(c => c.price && c.sqm &&
-      Math.abs(c.sqm - listing.sqm) / listing.sqm < 0.50 && // within ±50% size
-      c.url !== listing.url
-    );
-}
-
-async function fetchRentals(listing, market) {
-  const actorId = ACTORS[market];
-  if (!actorId || !listing.postalCode) return [];
-
-  const items = await runApify(actorId, {
-    query: listing.postalCode,
-    propertyType: listing.propertyType,
-    listingType: 'rent',
-    maxItems: 20,
-  });
-
-  return items.map(i => normalizeListing(i, market)).filter(r => r.price && r.sqm);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LISTING NORMALIZER
-// Converts raw Apify output to canonical get9d listing shape
-// ─────────────────────────────────────────────────────────────────────────────
-function normalizeListing(raw, market, sourceUrl) {
-  const price = raw.price || raw.askingPrice || raw.preis || raw.precio || null;
-  const sqm = raw.sqm || raw.area || raw.wohnflaeche || raw.superficie || null;
-  return {
-    url: raw.url || sourceUrl || null,
-    address: raw.address || raw.adresse || raw.direccion || null,
-    postalCode: raw.postalCode || raw.plz || raw.cp || extractPostalCode(raw.address),
-    city: raw.city || raw.ort || raw.ciudad || null,
-    region: raw.region || raw.bundesland || raw.provincia || raw.canton || null,
-    market,
-    price: price ? parseFloat(String(price).replace(/[^0-9.]/g, '')) : null,
-    sqm: sqm ? parseFloat(String(sqm).replace(/[^0-9.]/g, '')) : null,
-    priceSqm: price && sqm ? Math.round(price / sqm) : null,
-    bedrooms: raw.bedrooms || raw.zimmer || raw.habitaciones || null,
-    propertyType: raw.propertyType || raw.type || raw.typ || 'residential',
-    portal: raw.portal || market,
-    daysOnMarket: raw.daysOnMarket || raw.tageOnline || raw.diasAnuncio || null,
-    priceReductions: raw.priceReductions || raw.preissenkungen || raw.bajasDePrecios || [],
-    isAuction: raw.isAuction || raw.zwangsversteigerung || raw.subasta || false,
-    auctionType: raw.auctionType || null,
-    description: raw.description || raw.beschreibung || raw.descripcion || '',
-    energyRating: raw.energyRating || raw.energieklasse || raw.calificacionEnergetica || null,
-    listedAt: raw.listedAt || raw.firstSeen || null,
-    previouslyWithdrawn: raw.previouslyWithdrawn || raw.wiedereingestellt || false,
-    hasRegistrationNumber: raw.agentRegistrationNumber || raw.numeroColegiado || null,
-    encumbranceMentioned: /carg[ae]|gravamen|hipoteca|schuld|belast/i.test(raw.description || ''),
-  };
-}
-
-function extractPostalCode(address) {
-  if (!address) return null;
-  const m = address.match(/\b(\d{4,5})\b/);
-  return m ? m[1] : null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D1 — VALUATION
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreValuation(listing, comparables) {
-  const name = 'Valuation';
-
-  if (!listing.priceSqm) {
-    return { name, score: null, confidence: null, state: 'MISSING_PRICE', inputs: {} };
-  }
-
-  if (comparables.length < MIN_COMPARABLES) {
-    return {
-      name, score: null, confidence: 'low', state: 'LIMITED_DATA',
-      message: `Only ${comparables.length} comparable${comparables.length !== 1 ? 's' : ''} found (minimum ${MIN_COMPARABLES}). D1 Valuation score withheld to avoid misleading output.`,
-      inputs: { subjectPriceSqm: listing.priceSqm, comparablesFound: comparables.length },
-    };
-  }
-
-  const prices = comparables.map(c => c.priceSqm).sort((a, b) => a - b);
-  const median = prices[Math.floor(prices.length / 2)];
-  const p25 = prices[Math.floor(prices.length * 0.25)];
-  const p75 = prices[Math.floor(prices.length * 0.75)];
-  const gap = (listing.priceSqm - median) / median; // negative = underpriced
-
-  let score;
-  if      (gap <= -0.25) score = 9.5 + Math.min(0.5, (-gap - 0.25) * 2);
-  else if (gap <= -0.15) score = 8.0 + ((-0.15 - gap) / 0.10) * 1.5;
-  else if (gap <= -0.05) score = 6.5 + ((-0.05 - gap) / 0.10) * 1.5;
-  else if (gap <=  0.05) score = 5.5 + ((0.05 - gap) / 0.10) * 1.0;
-  else if (gap <=  0.15) score = 4.0 + ((0.15 - gap) / 0.10) * 1.5;
-  else if (gap <=  0.30) score = 2.5 + ((0.30 - gap) / 0.15) * 1.5;
-  else                   score = Math.max(1.0, 2.5 - (gap - 0.30) * 5);
-
-  const confidence = comparables.length >= 20 ? 'high' : comparables.length >= 10 ? 'medium' : 'low';
-
-  return {
-    name, state: 'SCORED',
-    score: Math.min(10, Math.max(1, Math.round(score * 10) / 10)),
-    confidence,
-    inputs: {
-      askingPriceSqm: listing.priceSqm,
-      marketMedianSqm: Math.round(median),
-      marketP25Sqm: Math.round(p25),
-      marketP75Sqm: Math.round(p75),
-      gapToMedianPct: Math.round(gap * 100),
-      comparablesUsed: comparables.length,
-      interpretation: gap < 0
-        ? `Asking ${Math.abs(Math.round(gap * 100))}% below area median`
-        : `Asking ${Math.round(gap * 100)}% above area median`,
-    },
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D2 — CLIMATE
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreClimate(listing, market) {
-  const name = 'Climate';
-  const baseline = CLIMATE_RISK[market] || CLIMATE_RISK.de;
-
-  // Sub-risk scores (higher = worse). Convert to 1-10 scale (higher = safer).
-  const subRisks = {
-    flood:    { level: baseline.flood,    label: riskLabel(baseline.flood) },
-    wildfire: { level: baseline.wildfire, label: riskLabel(baseline.wildfire) },
-    heat:     { level: baseline.heat,     label: riskLabel(baseline.heat) },
-    seismic:  { level: baseline.seismic,  label: riskLabel(baseline.seismic) },
-    coastal:  { level: baseline.coastal,  label: riskLabel(baseline.coastal) },
-  };
-
-  // Composite: weighted average of sub-risks, inverted (lower risk = higher score)
-  const weights = { flood: 0.30, wildfire: 0.25, heat: 0.25, seismic: 0.10, coastal: 0.10 };
-  const weightedRisk = Object.keys(weights).reduce((sum, key) => sum + baseline[key] * weights[key], 0);
-  const score = Math.round((10 - weightedRisk) * 10) / 10;
-
-  const flags = [];
-  if (baseline.flood >= 7) flags.push('HIGH_FLOOD_RISK — verify GEORISQUES / EFAS flood zone before purchase');
-  if (baseline.wildfire >= 7) flags.push('HIGH_WILDFIRE_RISK — check local PPRI/PPRIF or GWIS wildfire hazard map');
-  if (baseline.heat >= 8) flags.push('EXTREME_HEAT_EXPOSURE — factor A/C and insulation costs into D4 ROI');
-  if (baseline.seismic >= 6) flags.push('ELEVATED_SEISMIC_RISK — structural insurance recommended');
-
-  return {
-    name, state: 'SCORED',
-    score: Math.max(1, score),
-    confidence: 'medium',
-    subRisks,
-    flags,
-    inputs: {
-      market,
-      note: 'Regional baseline risk. For property-level accuracy, cross-reference exact address on Copernicus EFAS (flood), GWIS (wildfire) and national risk portals.',
-      sources: ['Copernicus Climate Change Service', 'EFAS', 'GWIS', 'Eurostat'],
-    },
-  };
-}
-
-function riskLabel(level) {
-  if (level <= 2) return 'Low';
-  if (level <= 4) return 'Moderate';
-  if (level <= 6) return 'Elevated';
-  if (level <= 8) return 'High';
-  return 'Extreme';
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D3 — DEMOGRAPHIC
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreDemographic(listing, market) {
-  const name = 'Demographic';
-  // Regional demographic data would normally come from Eurostat API (cached)
-  // Directional defaults by market — replace with live Eurostat NUTS-3 lookup
-  const demo = {
-    ch: { popGrowth5yr: 0.08, under40pct: 0.45, migrationTrend: 'positive', source: 'BFS 2024' },
-    de: { popGrowth5yr: 0.02, under40pct: 0.40, migrationTrend: 'stable',   source: 'Destatis 2024' },
-    at: { popGrowth5yr: 0.05, under40pct: 0.42, migrationTrend: 'positive', source: 'Statistik Austria 2024' },
-    es: { popGrowth5yr: 0.04, under40pct: 0.38, migrationTrend: 'positive', source: 'INE 2024' },
-    pt: { popGrowth5yr: 0.03, under40pct: 0.36, migrationTrend: 'stable',   source: 'INE PT 2024' },
-    it: { popGrowth5yr: -0.01, under40pct: 0.34, migrationTrend: 'negative', source: 'ISTAT 2024' },
-    fr: { popGrowth5yr: 0.03, under40pct: 0.40, migrationTrend: 'stable',   source: 'INSEE 2024' },
-  }[market] || { popGrowth5yr: 0, under40pct: 0.38, migrationTrend: 'stable', source: 'Eurostat' };
-
-  let score = 5.0;
-  score += demo.popGrowth5yr * 30;    // +3 for 10% growth over 5yr
-  score += (demo.under40pct - 0.35) * 20; // +1 per 5ppt above 35% base
-  if (demo.migrationTrend === 'positive') score += 1.0;
-  if (demo.migrationTrend === 'negative') score -= 1.5;
-
-  return {
-    name, state: 'SCORED',
-    score: Math.min(10, Math.max(1, Math.round(score * 10) / 10)),
-    confidence: 'medium',
-    inputs: {
-      populationGrowth5yr: `${(demo.popGrowth5yr * 100).toFixed(1)}%`,
-      under40Share: `${(demo.under40pct * 100).toFixed(0)}%`,
-      migrationTrend: demo.migrationTrend,
-      level: 'Regional baseline — sub-national data available via Eurostat NUTS-3',
-      source: demo.source,
-    },
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D4 — RETURN ON INVESTMENT
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreROI(listing, comparables, rentals, market) {
-  const name = 'Return on Investment';
-
-  if (!listing.price) return { name, score: null, state: 'MISSING_PRICE', inputs: {} };
-
-  const regionKey = `${market}_${listing.region || 'default'}`;
-  const tx = TX_COSTS[regionKey] || TX_COSTS[`${market}_default`] || TX_COSTS[market] || TX_COSTS.de_default;
-  const totalAcquisitionCost = listing.price * (1 + tx.total);
-
-  // Estimate annual gross rent from rental comparables
-  let annualGrossRent = null;
-  let rentConfidence = 'low';
-  if (rentals.length >= 3) {
-    const avgRentSqm = rentals.reduce((s, r) => s + r.priceSqm, 0) / rentals.length;
-    annualGrossRent = avgRentSqm * (listing.sqm || 80) * 12;
-    rentConfidence = rentals.length >= 8 ? 'high' : 'medium';
-  }
-
-  // Operating cost assumptions (conservative)
-  const maintenanceRate = 0.012; // 1.2% of property value per year
-  const voidRate = 0.042;        // 4.2% of annual rent (≈ 2.2 weeks void)
-  const mgmtRate = 0.10;         // 10% management if outsourced
-
-  let score = null;
-  let netYield = null;
-  let grossYield = null;
-
-  if (annualGrossRent) {
-    grossYield = annualGrossRent / listing.price;
-    const opCosts = (listing.price * maintenanceRate) + (annualGrossRent * voidRate);
-    const annualNetRent = annualGrossRent - opCosts;
-    netYield = annualNetRent / totalAcquisitionCost;
-
-    if      (netYield >= 0.07) score = 9.0 + Math.min(1.0, (netYield - 0.07) * 10);
-    else if (netYield >= 0.05) score = 7.0 + (netYield - 0.05) / 0.02 * 2.0;
-    else if (netYield >= 0.03) score = 5.0 + (netYield - 0.03) / 0.02 * 2.0;
-    else if (netYield >= 0.01) score = 3.0 + (netYield - 0.01) / 0.02 * 2.0;
-    else score = Math.max(1.0, 3.0 + netYield * 50);
-  }
-
-  const txCostFormatted = Object.entries(tx)
-    .filter(([k]) => k !== 'total')
-    .map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`)
-    .join(', ');
-
-  return {
-    name, state: annualGrossRent ? 'SCORED' : 'LIMITED_DATA',
-    score: score ? Math.min(10, Math.max(1, Math.round(score * 10) / 10)) : null,
-    confidence: rentals.length >= 8 ? 'high' : rentals.length >= 3 ? 'medium' : 'low',
-    inputs: {
-      purchasePrice: listing.price,
-      totalAcquisitionCost: Math.round(totalAcquisitionCost),
-      transactionCosts: `${(tx.total * 100).toFixed(1)}% (${txCostFormatted})`,
-      estimatedGrossRent: annualGrossRent ? Math.round(annualGrossRent) : 'Insufficient rental data',
-      grossYield: grossYield ? `${(grossYield * 100).toFixed(2)}%` : null,
-      netYield: netYield ? `${(netYield * 100).toFixed(2)}%` : null,
-      rentComparablesUsed: rentals.length,
-      rentConfidence,
-      maintenanceAssumption: `${(maintenanceRate * 100).toFixed(1)}% p.a. of property value`,
-      voidAssumption: `${(voidRate * 100).toFixed(1)}% of annual rent`,
-    },
-    disclaimer: 'Projections are indicative only. Actual returns depend on financing terms, tax regime, property condition, local market conditions, and tenant risk. Not financial advice.',
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D5 — RENTAL / VACANCY
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreRentalVacancy(listing, rentals, market) {
-  const name = 'Rental / Vacancy';
-
-  if (rentals.length < 3) {
-    return {
-      name, state: 'LIMITED_DATA',
-      score: null, confidence: 'low',
-      message: `Only ${rentals.length} rental comparable${rentals.length !== 1 ? 's' : ''} found. Rental/Vacancy score withheld.`,
-      inputs: { rentalsFound: rentals.length },
-    };
-  }
-
-  const avgRentSqm = rentals.reduce((s, r) => s + r.priceSqm, 0) / rentals.length;
-  const grossYield = avgRentSqm * 12 / (listing.priceSqm || 1);
-
-  let score = 5.0;
-  if (grossYield >= 0.08) score = 9.0;
-  else if (grossYield >= 0.06) score = 7.5;
-  else if (grossYield >= 0.045) score = 6.0;
-  else if (grossYield >= 0.03) score = 4.5;
-  else score = 3.0;
-
-  // Rent control zone check
-  const controlledCities = RENT_CONTROL_CITIES[market] || [];
-  const city = listing.city || '';
-  const rentControlled = controlledCities.some(c => city.toLowerCase().includes(c.toLowerCase()));
-
-  const flags = [];
-  if (rentControlled) {
-    flags.push({
-      type: 'RENT_CONTROL',
-      level: 'warning',
-      message: `${city} is in a rent-control zone (${market === 'de' ? 'Mietpreisbremse' : market === 'es' ? 'Ley de Vivienda' : 'rent regulation applies'}). New rental contracts subject to statutory caps. Verify applicable Mietspiegel / índice de referencia before modelling income.`,
-    });
-    score = Math.max(score - 1.5, 1.0);
-  }
-
-  // DPE / energy restriction flag for France
-  if (market === 'fr' && !listing.energyRating) {
-    flags.push({
-      type: 'DPE_UNVERIFIED',
-      level: 'warning',
-      message: 'DPE (energy rating) not found in listing. French Loi Climat 2021 prohibits new rental contracts for G-rated properties (since 2025) and F-rated properties (from 2028). Verify DPE before modelling rental income.',
-    });
-  }
-  if (market === 'fr' && listing.energyRating && ['F', 'G'].includes(listing.energyRating.toUpperCase())) {
-    flags.push({
-      type: 'DPE_RENTAL_RESTRICTION',
-      level: 'critical',
-      message: `DPE ${listing.energyRating.toUpperCase()} — rental restricted under Loi Climat 2021. Long-term rental income not legally available without energy retrofit.`,
-    });
-    score = Math.max(score - 3.0, 1.0);
-  }
-
-  return {
-    name, state: 'SCORED',
-    score: Math.min(10, Math.max(1, Math.round(score * 10) / 10)),
-    confidence: rentals.length >= 10 ? 'high' : 'medium',
-    flags,
-    inputs: {
-      avgRentPerSqm: Math.round(avgRentSqm),
-      estimatedGrossYield: `${(grossYield * 100).toFixed(2)}%`,
-      rentComparablesUsed: rentals.length,
-      rentControlZone: rentControlled,
-      energyRating: listing.energyRating || 'Not disclosed',
-    },
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D6 — LIVEABILITY
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreLiveability(listing, market) {
-  const name = 'Liveability';
-  // In production: query OSM Overpass API with listing lat/lon for amenity proximity
-  // Self-hosted Overpass instance recommended for production volume
-  // Fallback: city-level liveability baseline below
-
-  const cityBaselines = {
-    Zürich: 9.2, Bern: 8.5, Basel: 8.3, Genf: 8.1,
-    München: 8.8, Berlin: 8.5, Hamburg: 8.4, Frankfurt: 8.2,
-    Wien: 9.0, Graz: 7.8,
-    Madrid: 8.0, Barcelona: 8.5, Valencia: 7.8,
-    Lisboa: 7.8, Porto: 7.5,
-    Milano: 8.0, Roma: 7.5,
-    Paris: 8.5, Lyon: 7.8,
-  };
-
-  const city = listing.city || '';
-  const matchedCity = Object.keys(cityBaselines).find(c =>
-    city.toLowerCase().includes(c.toLowerCase())
-  );
-  const baseScore = matchedCity ? cityBaselines[matchedCity] : 5.5;
-
-  return {
-    name, state: 'SCORED',
-    score: baseScore,
-    confidence: matchedCity ? 'medium' : 'low',
-    inputs: {
-      city: listing.city || 'Unknown',
-      note: matchedCity
-        ? `City-level baseline score. Property-level score requires OSM Overpass API query for transit, amenities, noise, and school proximity.`
-        : 'City not matched. Score is conservative directional estimate. Run OSM query for accurate D6.',
-      source: 'get9d city index + OSM baseline (Overpass)',
-    },
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D7 — PRICE TREND  (renamed from Appreciation — forward-looking claim removed)
-// ─────────────────────────────────────────────────────────────────────────────
-function scorePriceTrend(listing, market) {
-  const name = 'Price Trend';
-  const trend = PRICE_TREND[market];
-  if (!trend) return { name, score: 5.0, confidence: 'low', inputs: { market } };
-
-  let score = 5.0;
-  score += trend.growth1yr * 30;   // +3 for 10% annual growth
-  score += trend.growth3yr * 10;   // +1 for 10% 3yr growth
-  if (trend.volatility === 'low')    score += 0.5;
-  if (trend.volatility === 'high')   score -= 1.0;
-
-  return {
-    name, state: 'SCORED',
-    score: Math.min(10, Math.max(1, Math.round(score * 10) / 10)),
-    confidence: 'medium',
-    inputs: {
-      growth1yr: `${(trend.growth1yr * 100).toFixed(1)}%`,
-      growth3yr: `${(trend.growth3yr * 100).toFixed(1)}%`,
-      volatility: trend.volatility,
-      source: trend.source,
-    },
-    disclaimer: 'Historical price data only. Past performance does not predict future values. Local supply, regulation, and macro conditions significantly affect future outcomes.',
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D8 — SELLER MOTIVATION
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreSellerMotivation(listing, market) {
-  const name = 'Seller Motivation';
-  let score = 5.0;
-  const signals = [];
-
-  // Market-specific median days on market
-  const medianDom = { ch: 45, de: 55, at: 60, es: 90, pt: 100, it: 120, fr: 75 }[market] || 70;
-
-  // Days on market
-  const dom = listing.daysOnMarket;
-  if (dom) {
-    if (dom > medianDom * 3) {
-      score += 2.5;
-      signals.push({ signal: 'STALE_LISTING', text: `Listed ${dom} days — ${Math.round(dom / medianDom)}× above area median (${medianDom} days)`, weight: 'high' });
-    } else if (dom > medianDom * 1.5) {
-      score += 1.0;
-      signals.push({ signal: 'EXTENDED_LISTING', text: `Listed ${dom} days (area median ${medianDom} days)`, weight: 'medium' });
+      scored.rawListings = listings;
+      if (portalErrors.length) scored.portalErrors = portalErrors;
+      return res.status(200).json(scored);
+    } catch (e) {
+      return res.status(500).json({ error: 'Scoring failed', detail: e.message });
     }
   }
 
-  // Price reductions
-  const reds = listing.priceReductions || [];
-  if (reds.length >= 3) {
-    const totalOff = reds.reduce((s, r) => s + (r.pctOff || 0), 0);
-    score += 2.5;
-    signals.push({ signal: 'MULTIPLE_REDUCTIONS', text: `${reds.length} price reductions — total ${totalOff.toFixed(0)}% off original ask`, weight: 'high' });
-  } else if (reds.length >= 1) {
-    score += 1.0;
-    signals.push({ signal: 'PRICE_REDUCTION', text: `${reds.length} price reduction recorded`, weight: 'medium' });
-  }
-
-  // Re-listing
-  if (listing.previouslyWithdrawn) {
-    score += 1.5;
-    signals.push({ signal: 'RE_LISTED', text: 'Previously withdrawn and re-listed — strong motivation indicator', weight: 'high' });
-  }
-
-  // Auction channel
-  if (listing.isAuction) {
-    score += 2.0;
-    signals.push({ signal: 'JUDICIAL_AUCTION', text: `Court/judicial auction (${listing.auctionType || 'forced sale'}) — seller has no price discretion`, weight: 'high' });
-  }
-
-  // Distress language in description
-  const distressTerms = ['urgent', 'urgente', 'dringend', 'schnell verkauf', 'last chance',
-    'price reduced', 'motivated seller', 'estate sale', 'bankrupt', 'concurso',
-    'saisie', 'verwertung', 'price negotiable'];
-  const found = distressTerms.filter(t => listing.description.toLowerCase().includes(t));
-  if (found.length > 0) {
-    score += found.length * 0.5;
-    signals.push({ signal: 'DISTRESS_LANGUAGE', text: `Description contains distress language: "${found.join('", "')}"`, weight: 'medium' });
-  }
-
-  // Abnormally low price vs market (D8 picks this up independently of D1)
-  if (listing.priceSqm && listing.market) {
-    // If price is below plausible floor for any European market (very rough guard)
-    const absoluteFloor = 400; // €/sqm — nothing livable goes below this anywhere in our markets
-    if (listing.priceSqm < absoluteFloor) {
-      score += 1.5;
-      signals.push({ signal: 'PRICE_ANOMALY', text: `Asking price €${listing.priceSqm}/sqm is below the minimum plausible floor for this market (€${absoluteFloor}/sqm). Investigate undisclosed encumbrances, illegal construction, or fraud before any contact.`, weight: 'critical' });
-    }
-  }
-
-  const confidence = (dom !== null || reds.length > 0 || listing.isAuction) ? 'high' : 'medium';
-
-  return {
-    name, state: 'SCORED',
-    score: Math.min(10, Math.max(1, Math.round(score * 10) / 10)),
-    confidence,
-    signals,
-    inputs: {
-      daysOnMarket: listing.daysOnMarket,
-      priceReductionCount: reds.length,
-      isAuction: listing.isAuction,
-      previouslyWithdrawn: listing.previouslyWithdrawn,
-      distressLanguageFound: found?.length || 0,
-    },
-    note: 'D8 reflects observable listing behaviour only. A high score indicates motivation signals — not a guarantee of transaction success or below-market price.',
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// D9 — LEGAL
-// ─────────────────────────────────────────────────────────────────────────────
-function scoreLegal(listing, market) {
-  const name = 'Legal';
-  let score = 7.0; // Start from reasonable baseline — European frameworks are generally solid
-  const flags = [];
-
-  // Agency registration check
-  if (!listing.hasRegistrationNumber) {
-    score -= 1.0;
-    flags.push({ type: 'NO_AGENT_REGISTRATION', level: 'warning', message: 'No agent registration number found. In Spain: require RAICV/API number. In Germany: MaBV licence. In France: carte professionnelle.' });
-  }
-
-  // Encumbrance mentions in listing text
-  if (listing.encumbranceMentioned) {
-    score -= 2.5;
-    flags.push({ type: 'ENCUMBRANCE_MENTIONED', level: 'critical', message: 'Description contains language suggesting charges, mortgages, or legal encumbrances. Obtain Nota Simple (ES), Grundbuchauszug (DE), or Extrait hypothécaire (FR/CH) before proceeding.' });
-  }
-
-  // Energy rating missing (mandatory by EU law)
-  if (!listing.energyRating) {
-    score -= 0.5;
-    flags.push({ type: 'ENERGY_RATING_MISSING', level: 'warning', message: 'EPC / DPE / Energieausweis not disclosed. Mandatory under EU Energy Performance of Buildings Directive for all sale listings. Seller must provide on request.' });
-  }
-
-  // Auction-specific legal checks
-  if (listing.isAuction && market === 'de') {
-    flags.push({ type: 'AUCTION_WERTGUTACHTEN', level: 'info', message: 'ZVG (Zwangsversteigerung) proceedings require the Wertgutachten (court valuation) to be publicly available. Obtain and review before any bid. Check for occupancy status and outstanding charges (Lasten).' });
-  }
-  if (listing.isAuction && market === 'es') {
-    flags.push({ type: 'AUCTION_CARGAS', level: 'info', message: 'BOE judicial auction notice must list cargas y gravámenes (charges and encumbrances). Verify full BOE listing and obtain Nota Simple from Registro de la Propiedad before bidding.' });
-  }
-
-  // Extreme underpricing — cross-check with D8 anomaly
-  const absoluteFloor = 400;
-  if (listing.priceSqm && listing.priceSqm < absoluteFloor) {
-    score -= 2.0;
-    flags.push({ type: 'PRICE_BELOW_FLOOR', level: 'critical', message: `Price €${listing.priceSqm}/sqm is below the minimum plausible market floor. May indicate hidden legal issues, demolition order, illegal construction, or fraud. Do not pay any deposit without independent legal verification.` });
-  }
-
-  score = Math.min(10, Math.max(1, Math.round(score * 10) / 10));
-
-  return {
-    name, state: 'SCORED',
-    score,
-    confidence: 'medium',
-    flags,
-    suppressionActive: score < 4.0,
-    inputs: {
-      agentRegistered: !!listing.hasRegistrationNumber,
-      encumbranceMentioned: listing.encumbranceMentioned,
-      energyRatingDisclosed: !!listing.energyRating,
-      isAuction: listing.isAuction,
-      market,
-    },
-    disclaimer: 'D9 is based on observable public data only and does NOT confirm title clarity, absence of encumbrances, planning legality, or compliance with building regulations. Independent legal due diligence by a qualified local solicitor/notaire/Notar/abogado is mandatory before any property transaction. get9d does not provide legal advice.',
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// COMPOSITE SCORE + D9 SUPPRESSION
-// ─────────────────────────────────────────────────────────────────────────────
-function buildComposite(scores, tier) {
-  const { d1, d2, d3, d4, d5, d6, d7, d8, d9 } = scores;
-
-  // D9 suppression: if D9 < 4.0, composite capped at 5.0 regardless
-  const d9Score = d9.score || 0;
-  const suppressionActive = d9Score < 4.0;
-
-  // Weights for composite (only scored dimensions count)
-  const weights = { d1: 0.25, d2: 0.08, d3: 0.08, d4: 0.20, d5: 0.12, d6: 0.08, d7: 0.08, d8: 0.06, d9: 0.05 };
-  let weightedSum = 0;
-  let totalWeight = 0;
-
-  Object.entries(scores).forEach(([key, dim]) => {
-    if (dim.score !== null && dim.score !== undefined && dim.state !== 'LIMITED_DATA') {
-      weightedSum += dim.score * (weights[key] || 0.05);
-      totalWeight += weights[key] || 0.05;
-    }
+  return res.status(400).json({
+    error: 'Use mode: "score", "url", or "proxy".',
+    verifiedMarkets: Object.entries(PORTAL_CONFIG).filter(([,v])=>v!==null).map(([k])=>k),
+    unsupportedMarkets: Object.entries(PORTAL_CONFIG).filter(([,v])=>v===null).map(([k])=>k),
+    example: { mode: 'score', location: 'Aarau, Aargau', propertyType: 'buy', minPrice: 500000, maxPrice: 1500000, minRooms: 3 },
   });
-
-  let composite = totalWeight > 0 ? weightedSum / totalWeight : null;
-  if (composite !== null && suppressionActive) composite = Math.min(composite, 5.0);
-
-  const rating = composite === null ? 'INSUFFICIENT_DATA' :
-    composite >= 8.0 ? 'EXCELLENT_DEAL' :
-    composite >= 6.5 ? 'GOOD_DEAL' :
-    composite >= 5.0 ? 'FAIR_PRICE' :
-    composite >= 3.5 ? 'WATCH' : 'AVOID';
-
-  return {
-    composite: composite !== null ? Math.round(composite * 10) / 10 : null,
-    suppressed: suppressionActive,
-    rating,
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TIER GATING
-// free  → D1 (score only, no inputs) + D8 (traffic light only)
-// core  → D1–D6 full
-// pro   → D1–D9 full
-// ─────────────────────────────────────────────────────────────────────────────
-function gateDimensions(scores, tier) {
-  const { d1, d2, d3, d4, d5, d6, d7, d8, d9 } = scores;
-
-  if (tier === 'free') {
-    return {
-      d1: { ...d1, inputs: undefined }, // score only
-      d8: { name: d8.name, trafficLight: d8.score >= 7 ? 'red' : d8.score >= 5 ? 'amber' : 'green', upgradeRequired: true },
-      locked: ['d2', 'd3', 'd4', 'd5', 'd6', 'd7', 'd9'],
-    };
-  }
-
-  if (tier === 'core') {
-    return { d1, d2, d3, d4, d5, d6, locked: ['d7', 'd8', 'd9'] };
-  }
-
-  // pro — full access
-  return { d1, d2, d3, d4, d5, d6, d7, d8, d9 };
 }
