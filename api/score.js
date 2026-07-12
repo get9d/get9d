@@ -115,22 +115,22 @@ const PORTAL_CONFIG = {
   }],
 
   // ── Spain / Portugal / Italy ──────────────────────────────────────────────
-  // Actor: blackfalcondata/idealista-scraper (pay-per-event, no subscription required)
-  // Input: country (es/pt/it), operation (sale/rent), propertyType (homes), location, maxResults
+  // Actor: igolaizola/idealista-scraper (actively maintained; blackfalcondata is DEPRECATED → 400)
+  // Input: country (es/pt/it), operation (sale/rent), propertyType (homes), location (city name or Idealista location ID), maxItems
   ES: [{
     name: 'Idealista (ES/PT/IT)',
-    actorId: 'blackfalcondata/idealista-scraper',
+    actorId: 'igolaizola/idealista-scraper',
     buildInput: (p) => ({
       country: p.country || 'es',
       operation: p.propertyType === 'rent' ? 'rent' : 'sale',
       propertyType: 'homes',
-      location: p.location || '',
-      maxResults: 30,
+      location: (p.location || '').toLowerCase(),
+      maxItems: 30,
     }),
     normalise: (i) => ({
-      title: i.title || (i.suggestedTexts && i.suggestedTexts.title) || '',
-      address: i.address || i.district || '',
-      price: i.price,
+      title: i.title || (i.suggestedTexts && i.suggestedTexts.title) || [i.propertyType, i.rooms ? i.rooms + ' hab.' : '', i.size ? i.size + 'm²' : ''].filter(Boolean).join(' · '),
+      address: [i.address, i.district, i.municipality, i.province].filter(Boolean).join(', '),
+      price: typeof i.price === 'number' ? i.price : (i.priceInfo && i.priceInfo.price && i.priceInfo.price.amount) || null,
       priceUnit: 'EUR',
       rooms: i.rooms,
       livingArea: i.size,
@@ -140,40 +140,22 @@ const PORTAL_CONFIG = {
       description: (i.description || '').slice(0, 500) || null,
       images: i.thumbnail ? [i.thumbnail] : [],
       source: 'idealista.com',
-      extras: { priceByArea: i.priceByArea, hasLift: i.hasLift },
+      extras: {
+        priceByArea: i.priceByArea,
+        hasLift: i.hasLift,
+        // Price-drop data feeds D8 Seller Motivation quick-scoring
+        priceReduced: !!(i.priceInfo && i.priceInfo.price && i.priceInfo.price.priceDropInfo),
+        priceDropPct: (i.priceInfo && i.priceInfo.price && i.priceInfo.price.priceDropInfo && i.priceInfo.price.priceDropInfo.priceDropPercentage) || null,
+      },
     }),
   }],
   PT: [{ alias: 'ES', country: 'pt', source: 'idealista.pt' }],
   IT: [{ alias: 'ES', country: 'it', source: 'idealista.it' }],
 
   // ── France ────────────────────────────────────────────────────────────
-  // No single verified actor found for SeLoger — using Idealista France
-  // Actor: igolaizola/idealista-scraper supports France too
-  FR: [{
-    name: 'Idealista France',
-    actorId: 'blackfalcondata/idealista-scraper',
-    buildInput: (p) => ({
-      country: 'fr',
-      operation: p.propertyType === 'rent' ? 'rent' : 'sale',
-      location: p.location || '',
-      maxResults: 30,
-    }),
-    normalise: (i) => ({
-      title: i.title || '',
-      address: i.address || i.district || '',
-      price: i.price,
-      priceUnit: 'EUR',
-      rooms: i.rooms,
-      livingArea: i.size,
-      floor: i.floor || null,
-      yearBuilt: null,
-      listingUrl: i.url || null,
-      description: (i.description || '').slice(0, 500) || null,
-      images: i.thumbnail ? [i.thumbnail] : [],
-      source: 'idealista.fr',
-      extras: {},
-    }),
-  }],
+  // Idealista does not operate in France (ES/IT/PT only) and no verified
+  // SeLoger/LeBonCoin actor is currently available — honest no-actor state.
+  FR: null,
 
   // ── United Kingdom ────────────────────────────────────────────────────────
   // Actor: automation-lab/rightmove-scraper (verified ✓, fast HTTP, pay-per-listing)
