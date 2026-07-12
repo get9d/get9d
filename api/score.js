@@ -11,7 +11,9 @@ const ALLOWED_MODELS = [
   'claude-opus-4-8','claude-sonnet-4-6','claude-haiku-4-5-20251001',
   'claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-3-opus-20240229',
 ];
-const MAX_TOKENS_CAP = 8192;
+const MAX_TOKENS_CAP = 8192;   // proxy mode (frontend single-property scoring — no Apify in the same request)
+const SCORE_TOKENS   = 3600;   // discovery mode — must fit alongside Apify inside 60s Vercel limit
+const URL_SCORE_TOKENS = 2800; // url mode — single listing after Apify detail scrape
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 
 // ─── VERIFIED PORTAL REGISTRY ─────────────────────────────────────────────
@@ -527,7 +529,7 @@ async function fetchAuctionListings(searchParams) {
     : normAuc.location;
   const input = auctionSource.buildInput({ ...searchParams, location: aucLocation });
   const res = await fetch(
-    `https://api.apify.com/v2/acts/${auctionSource.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
+    `https://api.apify.com/v2/acts/${auctionSource.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
   );
 
@@ -551,7 +553,7 @@ async function fetchAuctionListings(searchParams) {
     return true;
   });
 
-  return { listings: filtered, market, portalErrors: [] };
+  return { listings: filtered.slice(0, 5), market, portalErrors: [] };
 }
 
 // ─── Market detection ──────────────────────────────────────────────────────
@@ -697,13 +699,20 @@ async function fetchListings(searchParams) {
   const results = await Promise.allSettled(
     portals.map(async (portal) => {
       const input = portal.buildInput(actorParams);
-      const res = await fetch(
-        `https://api.apify.com/v2/acts/${portal.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
-      );
-      if (!res.ok) throw new Error(`${portal.name} → ${res.status} ${res.statusText}`);
-      const items = await res.json();
-      return { portal: portal.name, items: Array.isArray(items) ? items : [] };
+      // Abort at 28s — Apify's timeout=25 should return first, this is the safety net
+      const ctrl = new AbortController();
+      const abortTimer = setTimeout(() => ctrl.abort(), 28000);
+      try {
+        const res = await fetch(
+          `https://api.apify.com/v2/acts/${portal.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: ctrl.signal }
+        );
+        if (!res.ok) throw new Error(`${portal.name} → ${res.status} ${res.statusText}`);
+        const items = await res.json();
+        return { portal: portal.name, items: Array.isArray(items) ? items : [] };
+      } finally {
+        clearTimeout(abortTimer);
+      }
     })
   );
 
@@ -727,7 +736,9 @@ async function fetchListings(searchParams) {
   });
 
   return {
-    listings: deduped.slice(0, 15), market, portalErrors,
+    // Score at most 5 listings — keeps the Claude scoring call fast enough
+    // to fit alongside the Apify scrape inside Vercel's 60s function limit.
+    listings: deduped.slice(0, 5), market, portalErrors,
     ...(norm.substituted && { locationSubstituted: true, searchedLocation: norm.location, originalLocation: norm.original }),
   };
 }
@@ -753,7 +764,7 @@ async function fetchListingByUrl(listingUrl, countryCode) {
   // (Apify's requestListSources standard) and let 400s trigger a string retry.
   let input = { [scraper.inputKey]: [{ url: listingUrl }], maxItems: 1 };
 
-  const endpoint = `https://api.apify.com/v2/acts/${scraper.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`;
+  const endpoint = `https://api.apify.com/v2/acts/${scraper.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=25`;
   let res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
 
   // Retry once with plain-string URL array if the object form was rejected
@@ -971,6 +982,13 @@ SEARCH: ${market} | ${searchParams.location} | ${searchParams.propertyType==='re
 REAL LISTINGS (${listings.length}):
 ${listingsSummary}
 
+BREVITY (hard limits — total output must stay under 3,000 tokens):
+- Score ALL ${listings.length} listings, none skipped.
+- rationale: ONE short sentence per dimension (max 15 words).
+- key_inputs: max 2 items per dimension, each under 10 words.
+- signals (D8): max 3 entries. flags (D9): max 2 entries.
+- summary: max 2 short sentences. No filler. Compact JSON.
+
 Respond ONLY in valid JSON — no preamble, no markdown fences:
 {"results":[{"rank":1,"title":"...","address":"...","price":0,"priceUnit":"${currency}","listingUrl":"...","source":"...","compositeScore":7.4,"suppressed":false,"suppressionReason":null,"dimensions":{"D1":{"score":7.0,"state":"SCORED","label":"Valuation & Renovation","confidence":"medium","key_inputs":["Asking €X/m² vs area median €Y/m²","N comparables used"],"rationale":"...","self_critical":"...","tags_positive":[],"tags_warning":[]},"D2":{"score":7.5,"label":"Climate Risk","confidence":"high","key_inputs":["Flood zone: moderate","Wildfire: low"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D3":{"score":7.5,"label":"Demographic Trend","confidence":"medium","key_inputs":["Population +X% 5yr","Household formation: positive"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D4":{"score":6.0,"label":"Return on Investment","confidence":"medium","key_inputs":["Gross yield ~X%","Net yield ~Y% after ~Z% transaction costs","Rent control: no"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D5":{"score":7.0,"label":"Rental / Vacancy","confidence":"medium","key_inputs":["Avg rent €X/m²","Vacancy: low"],"rationale":"...","rentControlFlag":false,"tags_positive":[],"tags_warning":[]},"D6":{"score":9.0,"label":"Liveability & Proximity","confidence":"high","key_inputs":["Transit: excellent","Schools: within 500m"],"rationale":"...","tags_positive":[],"tags_warning":[]},"D7":{"score":7.5,"label":"Price Trend","confidence":"medium","key_inputs":["1yr HPI: +X%","3yr CAGR: +Y%"],"rationale":"...","disclaimer":"Historical price data only. Past performance does not predict future values.","tags_positive":[],"tags_warning":[]},"D8":{"score":6.5,"label":"Seller Motivation","confidence":"high","key_inputs":["Listed N days","N price reductions"],"signals":[{"signal":"STALE_LISTING","text":"Listed 214 days vs market median 55 days","weight":"high"}],"rationale":"...","tags_positive":[],"tags_warning":[]},"D9":{"score":8.0,"label":"Legal & Regulatory","confidence":"medium","key_inputs":["Agency registered: yes","Encumbrances: none found","EPC: disclosed"],"flags":[],"rationale":"...","disclaimer":"D9 is based on observable public data only. Independent legal due diligence by a qualified local lawyer is mandatory before any property transaction. get9d does not provide legal advice.","tags_positive":[],"tags_warning":[]}},"flags":[],"summary":"Two-sentence investment thesis."}],"searchMeta":{"location":"${searchParams.location}","market":"${market}","listingsFound":${listings.length},"dataSource":"${isAuction ? 'court auction data via Apify (ZVG/BOE)' : 'live portal data via Apify'}","scoredAt":"${new Date().toISOString()}"}}`;
 }
@@ -1029,7 +1047,7 @@ export default async function handler(req, res) {
       const ar = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01' },
-        body: JSON.stringify({ model: scoringModel, max_tokens: MAX_TOKENS_CAP, messages: [{ role: 'user', content: buildScoringPrompt([listing], searchParams, market) }] }),
+        body: JSON.stringify({ model: scoringModel, max_tokens: URL_SCORE_TOKENS, messages: [{ role: 'user', content: buildScoringPrompt([listing], searchParams, market) }] }),
       });
       const ad = await ar.json();
       if (!ar.ok) return res.status(ar.status).json({ error: 'Scoring failed', detail: ad });
@@ -1101,7 +1119,7 @@ export default async function handler(req, res) {
       const ar = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01' },
-        body: JSON.stringify({ model: scoringModel, max_tokens: MAX_TOKENS_CAP, messages: [{ role: 'user', content: buildScoringPrompt(listings, searchParams, market, isAuction) }] }),
+        body: JSON.stringify({ model: scoringModel, max_tokens: SCORE_TOKENS, messages: [{ role: 'user', content: buildScoringPrompt(listings, searchParams, market, isAuction) }] }),
       });
       const ad = await ar.json();
       if (!ar.ok) return res.status(ar.status).json({ error: 'Scoring failed', detail: ad });
