@@ -11,7 +11,7 @@ const ALLOWED_MODELS = [
   'claude-opus-4-8','claude-sonnet-4-6','claude-haiku-4-5-20251001',
   'claude-3-5-sonnet-20241022','claude-3-5-haiku-20241022','claude-3-opus-20240229',
 ];
-const MAX_TOKENS_CAP = 4096;
+const MAX_TOKENS_CAP = 8192;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 
 // ─── VERIFIED PORTAL REGISTRY ─────────────────────────────────────────────
@@ -519,7 +519,13 @@ async function fetchAuctionListings(searchParams) {
     return { listings: [], market, noActor: true, reason: `Court auction data is currently available for Germany (ZVG-Portal) and Spain (BOE.es). Market ${market} auction coverage is coming soon.` };
   }
 
-  const input = auctionSource.buildInput(searchParams);
+  // Auctions: bare country name → search nationwide (empty location = no filter),
+  // otherwise strip the ", Country" suffix like the standard fetcher.
+  const normAuc = normaliseLocationForActor(searchParams.location, market);
+  const aucLocation = COUNTRY_NAME_PATTERNS.test((searchParams.location || '').trim())
+    ? '' // nationwide auction search
+    : normAuc.location;
+  const input = auctionSource.buildInput({ ...searchParams, location: aucLocation });
   const res = await fetch(
     `https://api.apify.com/v2/acts/${auctionSource.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
@@ -617,6 +623,34 @@ function detectMarket(location = '', countryCode = '') {
   return 'CH'; // default core market
 }
 
+// ─── Location normaliser for actor inputs ──────────────────────────────────
+// Portal actors need a city/region — a bare country name ("Spain") returns
+// zero results. If the location is only a country, substitute the market's
+// default search city. Also strips ", Country" suffixes ("Aarau, Switzerland"
+// → "Aarau") since most actors expect city-only input.
+const DEFAULT_SEARCH_CITY = {
+  CH:'Zürich', DE:'Berlin', AT:'Wien', GB:'London', FR:'Paris',
+  ES:'Madrid', PT:'Lisboa', IT:'Milano', US:'Miami', CA:'Toronto',
+  AE:'Dubai', SA:'Riyadh', AU:'Sydney', BR:'São Paulo', MX:'Ciudad de México',
+  SG:'Singapore', MY:'Kuala Lumpur', TH:'Bangkok', ZA:'Cape Town',
+};
+
+const COUNTRY_NAME_PATTERNS = /^(switzerland|schweiz|suisse|svizzera|germany|deutschland|austria|österreich|oesterreich|united kingdom|england|uk|france|portugal|italy|italia|spain|españa|espana|united states|usa|canada|uae|emirates|saudi arabia|saudi|australia|brazil|brasil|mexico|méxico|singapore|malaysia|thailand|south africa)$/i;
+
+function normaliseLocationForActor(location, market) {
+  let loc = (location || '').trim();
+
+  // Strip trailing ", Country" suffix — actors want city-only
+  loc = loc.replace(/,\s*(switzerland|schweiz|suisse|germany|deutschland|austria|österreich|united kingdom|uk|france|portugal|italy|italia|spain|españa|united states|usa|canada|uae|australia|brazil|mexico|singapore|malaysia|thailand|south africa)\s*$/i, '').trim();
+
+  // Bare country name → default search city for that market
+  if (!loc || COUNTRY_NAME_PATTERNS.test(loc)) {
+    return { location: DEFAULT_SEARCH_CITY[market] || loc, substituted: true, original: location };
+  }
+
+  return { location: loc, substituted: false, original: location };
+}
+
 // ─── Resolve alias entries ─────────────────────────────────────────────────
 function resolvePortals(market, searchParams) {
   const config = PORTAL_CONFIG[market];
@@ -651,14 +685,18 @@ async function fetchListings(searchParams) {
     return { listings: [], market, noActor: true, reason: `Market ${market} not yet supported` };
   }
 
-  const portals = resolvePortals(market, searchParams);
+  // Normalise the location: bare country → default city, strip ", Country" suffix
+  const norm = normaliseLocationForActor(searchParams.location, market);
+  const actorParams = { ...searchParams, location: norm.location };
+
+  const portals = resolvePortals(market, actorParams);
   if (!portals || portals.length === 0) {
     return { listings: [], market, noActor: true, reason: `No actor configured for ${market}` };
   }
 
   const results = await Promise.allSettled(
     portals.map(async (portal) => {
-      const input = portal.buildInput(searchParams);
+      const input = portal.buildInput(actorParams);
       const res = await fetch(
         `https://api.apify.com/v2/acts/${portal.actorId}/run-sync-get-dataset-items?token=${apifyToken}&timeout=50`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }
@@ -688,7 +726,10 @@ async function fetchListings(searchParams) {
     return true;
   });
 
-  return { listings: deduped.slice(0, 15), market, portalErrors };
+  return {
+    listings: deduped.slice(0, 15), market, portalErrors,
+    ...(norm.substituted && { locationSubstituted: true, searchedLocation: norm.location, originalLocation: norm.original }),
+  };
 }
 
 // ─── URL-based single listing fetch ───────────────────────────────────────
@@ -1018,7 +1059,7 @@ export default async function handler(req, res) {
     const market = detectMarket(location, countryCode || '');
     const isAuction = dealType === 'auction';
 
-    let listings = [], portalErrors = [];
+    let listings = [], portalErrors = [], locSubInfo = null;
 
     try {
       const result = isAuction
@@ -1026,6 +1067,9 @@ export default async function handler(req, res) {
         : await fetchListings(searchParams);
       listings = result.listings || [];
       portalErrors = result.portalErrors || [];
+      if (result.locationSubstituted) {
+        locSubInfo = { searchedLocation: result.searchedLocation, originalLocation: result.originalLocation };
+      }
 
       if (result.noActor) {
         return res.status(200).json({
@@ -1040,11 +1084,14 @@ export default async function handler(req, res) {
     }
 
     if (listings.length === 0) {
+      const wasCountryOnly = COUNTRY_NAME_PATTERNS.test((location || '').trim());
       return res.status(200).json({
         error: 'no_listings_found',
         message: isAuction
           ? `No court auctions currently listed for "${location}". Auction inventory changes weekly — try a whole Bundesland (e.g. "Bayern") or check back soon.`
-          : `No listings found for "${location}". Try a larger city, broader price range, or fewer filters.`,
+          : wasCountryOnly
+            ? `No listings found. Country-wide search defaulted to the capital — please enter a specific city or region (e.g. "Madrid", "Valencia", "Málaga") for better results.`
+            : `No listings found for "${location}". Try a larger city, broader price range, or fewer filters.`,
         market, portalErrors, results: [],
         searchMeta: { location, market, listingsFound: 0, dataSource: 'none — hallucination prevention active', scoredAt: new Date().toISOString() },
       });
@@ -1078,6 +1125,10 @@ export default async function handler(req, res) {
 
       scored.rawListings = listings;
       if (portalErrors.length) scored.portalErrors = portalErrors;
+      if (locSubInfo) {
+        scored.locationNote = `Country-level search — showing results for ${locSubInfo.searchedLocation}. Enter a specific city for targeted results.`;
+        if (scored.searchMeta) scored.searchMeta.searchedLocation = locSubInfo.searchedLocation;
+      }
       return res.status(200).json(scored);
     } catch (e) {
       return res.status(500).json({ error: 'Scoring failed', detail: e.message });
