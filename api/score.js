@@ -34,7 +34,7 @@ const PORTAL_CONFIG = {
       maxPrice: p.maxPrice || undefined,
       minRooms: p.minRooms || undefined,
       maxRooms: p.maxRooms || undefined,
-      maxItems: 10,
+      maxItems: 30,
     }),
     normalise: (i) => ({
       title: i.title || i.name || [i.rooms, 'Zimmer', i.propertyType].filter(Boolean).join(' ') || '',
@@ -62,7 +62,7 @@ const PORTAL_CONFIG = {
     buildInput: (p) => ({
       location: p.location || '',
       operation: p.propertyType === 'rent' ? 'rent' : 'buy',
-      maxResults: 10,
+      maxResults: 30,
     }),
     normalise: (i) => ({
       title: i.title || i.address || i.realEstateId || '',
@@ -91,7 +91,7 @@ const PORTAL_CONFIG = {
       location: p.location || 'Wien',
       operation: p.propertyType === 'rent' ? 'rent' : 'buy',
       country: 'at',
-      maxResults: 10,
+      maxResults: 30,
     }),
     normalise: (i) => ({
       title: i.title || i.address || '',
@@ -121,7 +121,7 @@ const PORTAL_CONFIG = {
       operation: p.propertyType === 'rent' ? 'rent' : 'sale',
       propertyType: 'homes',
       location: p.location || '',
-      maxResults: 10,
+      maxResults: 30,
     }),
     normalise: (i) => ({
       title: i.title || (i.suggestedTexts && i.suggestedTexts.title) || '',
@@ -152,7 +152,7 @@ const PORTAL_CONFIG = {
       country: 'fr',
       operation: p.propertyType === 'rent' ? 'rent' : 'sale',
       location: p.location || '',
-      maxResults: 10,
+      maxResults: 30,
     }),
     normalise: (i) => ({
       title: i.title || '',
@@ -180,7 +180,7 @@ const PORTAL_CONFIG = {
     buildInput: (p) => ({
       searchLocation: p.location || '',
       listingType: p.propertyType === 'rent' ? 'to_rent' : 'for_sale',
-      maxItems: 10,
+      maxItems: 30,
     }),
     normalise: (i) => ({
       title: i.displayAddress || i.address || i.title || '',
@@ -211,7 +211,7 @@ const PORTAL_CONFIG = {
       minPrice: p.minPrice || undefined,
       maxPrice: p.maxPrice || undefined,
       minBeds: p.minRooms || undefined,
-      maxItems: 10,
+      maxItems: 30,
       includeDetails: false,
     }),
     normalise: (i) => ({
@@ -248,7 +248,7 @@ const PORTAL_CONFIG = {
         startUrls: [{
           url: `https://www.propertyfinder.ae/en/search?c=2&t=1&fu=0&ob=nd&l=${loc}&rp=${type}`,
         }],
-        maxItems: 10,
+        maxItems: 30,
       };
     },
     normalise: (i) => ({
@@ -285,7 +285,7 @@ const PORTAL_CONFIG = {
         minPrice: p.minPrice || undefined,
         maxPrice: p.maxPrice || undefined,
         minBedrooms: p.minRooms || undefined,
-        maxListings: 10,
+        maxListings: 30,
       };
     },
     normalise: (i) => ({
@@ -553,7 +553,8 @@ async function fetchAuctionListings(searchParams) {
     return true;
   });
 
-  return { listings: filtered.slice(0, 5), market, portalErrors: [] };
+  const universeAuc = computeQuickScores(filtered.map(l => ({ ...l, isAuction: true })));
+  return { listings: universeAuc.slice(0, 5), universe: universeAuc, market, portalErrors: [] };
 }
 
 // ─── Market detection ──────────────────────────────────────────────────────
@@ -623,6 +624,62 @@ function detectMarket(location = '', countryCode = '') {
   }
 
   return 'CH'; // default core market
+}
+
+// ─── Deterministic quick-score engine ───────────────────────────────────────
+// Computes an instant, LLM-free 9D-lite score for EVERY listing in the batch,
+// so the user sees the full universe ranked — the AI deep-scores only the top 5.
+// Quick scores use only observable listing data: price/m² vs batch median (D1-lite),
+// days-on-market + price cuts + auction status (D8-lite), size/room signals.
+function computeQuickScores(listings) {
+  // Batch median price/m² from listings that have both price and area
+  const ppsList = listings
+    .filter(l => l.price && l.livingArea && l.livingArea > 10)
+    .map(l => l.price / l.livingArea)
+    .sort((a, b) => a - b);
+  const median = ppsList.length >= 3 ? ppsList[Math.floor(ppsList.length / 2)] : null;
+
+  return listings.map(l => {
+    let quickD1 = null, quickD8 = 5.0;
+    const reasons = [];
+
+    // D1-lite: gap to batch median
+    if (median && l.price && l.livingArea && l.livingArea > 10) {
+      const pps = l.price / l.livingArea;
+      const gap = (pps - median) / median;
+      if      (gap <= -0.25) { quickD1 = 9.5; reasons.push(`${Math.abs(Math.round(gap*100))}% below batch median €/m²`); }
+      else if (gap <= -0.10) { quickD1 = 8.0; reasons.push(`${Math.abs(Math.round(gap*100))}% below batch median €/m²`); }
+      else if (gap <=  0.10) { quickD1 = 6.0; reasons.push('At batch median €/m²'); }
+      else if (gap <=  0.25) { quickD1 = 4.0; reasons.push(`${Math.round(gap*100)}% above batch median €/m²`); }
+      else                   { quickD1 = 2.5; reasons.push(`${Math.round(gap*100)}% above batch median €/m²`); }
+    }
+
+    // D8-lite: observable motivation signals
+    const dom = l.extras?.daysOnMarket || l.daysOnMarket || null;
+    if (dom && dom > 120) { quickD8 += 2.0; reasons.push(`${dom} days on market`); }
+    else if (dom && dom > 60) { quickD8 += 1.0; reasons.push(`${dom} days on market`); }
+    if (l.extras?.priceReduced || /reduced|reduziert|rebajado|baisse/i.test(l.description || '')) {
+      quickD8 += 1.5; reasons.push('Price reduction detected');
+    }
+    if (l.isAuction || l.extras?.auctionType) { quickD8 += 2.0; reasons.push('Court auction'); }
+    if (/urgent|dringend|urgente|schnell/i.test(l.description || '')) {
+      quickD8 += 1.0; reasons.push('Urgency language in listing');
+    }
+    quickD8 = Math.min(10, quickD8);
+
+    // Quick composite: only from what we can actually compute
+    const parts = [quickD1, quickD8].filter(v => v !== null);
+    const quickScore = parts.length ? Math.round((parts.reduce((s, v) => s + v, 0) / parts.length) * 10) / 10 : null;
+
+    return {
+      ...l,
+      quickScore,
+      quickD1,
+      quickD8: Math.round(quickD8 * 10) / 10,
+      quickReasons: reasons.slice(0, 3),
+      pricePerSqm: (l.price && l.livingArea && l.livingArea > 10) ? Math.round(l.price / l.livingArea) : null,
+    };
+  }).sort((a, b) => (b.quickScore ?? -1) - (a.quickScore ?? -1));
 }
 
 // ─── Location normaliser for actor inputs ──────────────────────────────────
@@ -735,10 +792,15 @@ async function fetchListings(searchParams) {
     return true;
   });
 
+  // Quick-score EVERY listing deterministically (no LLM), rank by quickScore.
+  // The AI deep-scores only the top 5 — the full ranked universe is returned
+  // so the user sees every option found, not just the top matches.
+  const universe = computeQuickScores(deduped);
+
   return {
-    // Score at most 5 listings — keeps the Claude scoring call fast enough
-    // to fit alongside the Apify scrape inside Vercel's 60s function limit.
-    listings: deduped.slice(0, 5), market, portalErrors,
+    listings: universe.slice(0, 5),   // top 5 by quick score → AI deep scoring
+    universe,                          // full ranked universe → shown to user
+    market, portalErrors,
     ...(norm.substituted && { locationSubstituted: true, searchedLocation: norm.location, originalLocation: norm.original }),
   };
 }
@@ -995,6 +1057,19 @@ Respond ONLY in valid JSON — no preamble, no markdown fences:
 
 // ─── Main handler ──────────────────────────────────────────────────────────
 export default async function handler(req, res) {
+  try {
+    return await handleRequest(req, res);
+  } catch (err) {
+    // Top-level safety net — guarantee a JSON response even on unexpected
+    // crashes, so the frontend never receives a Vercel HTML error page.
+    console.error('Unhandled error in /api/score:', err);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'internal_error', message: err.message || 'Unexpected server error. Please retry.' });
+    }
+  }
+}
+
+async function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -1077,13 +1152,14 @@ export default async function handler(req, res) {
     const market = detectMarket(location, countryCode || '');
     const isAuction = dealType === 'auction';
 
-    let listings = [], portalErrors = [], locSubInfo = null;
+    let listings = [], portalErrors = [], locSubInfo = null, universe = [];
 
     try {
       const result = isAuction
         ? await fetchAuctionListings(searchParams)
         : await fetchListings(searchParams);
       listings = result.listings || [];
+      universe = result.universe || listings;
       portalErrors = result.portalErrors || [];
       if (result.locationSubstituted) {
         locSubInfo = { searchedLocation: result.searchedLocation, originalLocation: result.originalLocation };
@@ -1103,13 +1179,16 @@ export default async function handler(req, res) {
 
     if (listings.length === 0) {
       const wasCountryOnly = COUNTRY_NAME_PATTERNS.test((location || '').trim());
+      // Surface the actual portal failure so the user (and we) can diagnose —
+      // "no listings in Zürich" is almost always an actor error, not empty inventory.
+      const errDetail = portalErrors.length ? ` [Portal detail: ${portalErrors.join(' | ').slice(0, 300)}]` : '';
       return res.status(200).json({
         error: 'no_listings_found',
-        message: isAuction
+        message: (isAuction
           ? `No court auctions currently listed for "${location}". Auction inventory changes weekly — try a whole Bundesland (e.g. "Bayern") or check back soon.`
           : wasCountryOnly
             ? `No listings found. Country-wide search defaulted to the capital — please enter a specific city or region (e.g. "Madrid", "Valencia", "Málaga") for better results.`
-            : `No listings found for "${location}". Try a larger city, broader price range, or fewer filters.`,
+            : `No listings found for "${location}". Try a larger city, broader price range, or fewer filters.`) + errDetail,
         market, portalErrors, results: [],
         searchMeta: { location, market, listingsFound: 0, dataSource: 'none — hallucination prevention active', scoredAt: new Date().toISOString() },
       });
@@ -1142,6 +1221,15 @@ export default async function handler(req, res) {
       }
 
       scored.rawListings = listings;
+      // Full ranked universe — every listing found, quick-scored deterministically.
+      // Deep AI scores cover the top 5; the rest carry quickScore/quickReasons.
+      scored.universe = universe.map(u => ({
+        title: u.title, address: u.address, price: u.price, priceUnit: u.priceUnit,
+        rooms: u.rooms, livingArea: u.livingArea, pricePerSqm: u.pricePerSqm,
+        listingUrl: u.listingUrl, source: u.source,
+        quickScore: u.quickScore, quickD1: u.quickD1, quickD8: u.quickD8,
+        quickReasons: u.quickReasons, isAuction: u.isAuction || false,
+      }));
       if (portalErrors.length) scored.portalErrors = portalErrors;
       if (locSubInfo) {
         scored.locationNote = `Country-level search — showing results for ${locSubInfo.searchedLocation}. Enter a specific city for targeted results.`;
